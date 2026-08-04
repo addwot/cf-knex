@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
 import { createKnexClient } from '../../src/core/client'
+import { CfKnexError } from '../../src/core/errors'
 import { createFakeAdapter } from '../support/fake-adapter'
 
 test('generates dialect-appropriate SQL', async () => {
@@ -61,4 +62,34 @@ test('constructing a sqlite client does not throw (colorette/logger regression)'
   // doesn't throw) still fails as of this commit; see src/core/client.ts.
   const { adapter } = createFakeAdapter({ dialect: 'sqlite' })
   expect(() => createKnexClient(adapter)).not.toThrow()
+})
+
+test('_stream() throws CfKnexError with code UNSUPPORTED_CAPABILITY', () => {
+  const { adapter } = createFakeAdapter({ dialect: 'mysql' })
+  const db = createKnexClient(adapter)
+  const client = db.client as unknown as { _stream: () => unknown }
+  expect(() => client._stream()).toThrow(CfKnexError)
+  try {
+    client._stream()
+    throw new Error('expected _stream() to throw')
+  } catch (err) {
+    expect(err).toBeInstanceOf(CfKnexError)
+    expect((err as CfKnexError).code).toBe('UNSUPPORTED_CAPABILITY')
+  }
+})
+
+test('caller-supplied knexOptions cannot break the client or the sqlite defaults (precedence regression)', async () => {
+  // `connection` must merge with, not replace, the sqlite defaults --
+  // omitting `filename` here would otherwise reintroduce the
+  // colorette/logger crash documented in src/core/client.ts.
+  const { adapter: sqliteAdapter } = createFakeAdapter({ dialect: 'sqlite' })
+  expect(() => createKnexClient(sqliteAdapter, { connection: {} })).not.toThrow()
+
+  // `client` must always be `CfKnexClient` -- a caller-supplied `client`
+  // must not replace it, or every adapter call stops working.
+  const { adapter, calls } = createFakeAdapter({ dialect: 'mysql' })
+  class NotOurClient {}
+  const db = createKnexClient(adapter, { client: NotOurClient })
+  await db('users').where('id', 1).select('name')
+  expect(calls[0]?.sql).toBe('select `name` from `users` where `id` = ?')
 })
