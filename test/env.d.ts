@@ -5,7 +5,8 @@ declare namespace Cloudflare {
     HYPERDRIVE_PG: Hyperdrive
     // Forwarded from process.env via vitest.config.ts's miniflare.bindings —
     // test bodies run inside workerd, where process.env does not carry host
-    // environment variables. See docs/superpowers/notes/2026-08-04-workerd-spike.md.
+    // environment variables. See the comment on that binding for the full
+    // rationale (including why the fallback is `''`, not a URL).
     MYSQL_URL: string
   }
 }
