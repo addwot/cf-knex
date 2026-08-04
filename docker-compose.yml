@@ -21,7 +21,11 @@ services:
       POSTGRES_DB: cf_knex_test
     healthcheck: { test: ['CMD-SHELL', 'pg_isready -U postgres'], interval: 5s, retries: 20 }
   libsql:
-    image: ghcr.io/tursodatabase/libsql-server:latest
+    # Pinned by digest, not `:latest`. `docker compose up` aborts every other
+    # service's pull when one fails, so a bad upstream `:latest` takes down
+    # mysql/mariadb/postgres with it — locally and in CI alike. This digest is
+    # the `latest` index as of 2026-08-04 (multi-arch: linux/amd64, linux/arm64).
+    image: ghcr.io/tursodatabase/libsql-server@sha256:07d5da358f37f7f327cc33c1cb5278e7892e04225f011a65a76049372a308982
     ports: ['8080:8080']
     environment:
       SQLD_NODE: primary
