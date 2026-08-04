@@ -113,6 +113,11 @@ test.each<[string, string, string]>([
     'oracle://u:p@ss@h/db?note=a@b',
     'oracle://***@h/db?note=a@b',
   ],
+  // A malformed url — e.g. a template literal that lost its protocol prefix
+  // — is exactly the caller mistake that lands here, and the anchor on
+  // `scheme://` must not treat "no scheme" as "nothing to redact".
+  ['masks a password on a protocol-relative url (no scheme)', '//u:pASSWORD@h/db', '//***@h/db'],
+  ['masks a password on a fully schemeless url (no scheme, no //)', 'u:pASSWORD@h/db', 'u:***@h/db'],
 ])('redact %s', (_name, url, redacted) => {
   const err = catchCfKnexError(() => inferDriver({ engine: 'mysql', url }))
   expect(err.code).toBe('UNKNOWN_DRIVER')

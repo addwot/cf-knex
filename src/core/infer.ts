@@ -125,9 +125,18 @@ function schemeOf(url: string): string {
 // first left everything from the second `@` onward — including the rest of
 // the password — exposed in the output. The `+` is what fixes that: the
 // group matches greedily up to, but never past, the first `/` after the
-// scheme, so a later `@` in the path or query is untouched either way. This
-// string reaches error messages and logs, so a leak here is a real defect,
-// not a formatting nit.
+// scheme, so a later `@` in the path or query is untouched either way.
+//
+// The scheme and `//` are both optional (`?`, not required) because
+// `config.url` is an unvalidated string, and a caller can hand this
+// function something that isn't a well-formed absolute URL at all — e.g. a
+// template literal that lost its `scheme://` prefix. Requiring `scheme://`
+// to match at all made a schemeless url fall all the way through
+// unredacted, which is worse than any of the cases above: the whole
+// userinfo, not just part of it, reached the message verbatim. `u:` at the
+// very start of a schemeless url is genuinely indistinguishable from a
+// real scheme — that's fine, since it's the username, not the password,
+// that ends up in the clear.
 function redact(url: string): string {
-  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)(?:[^/@]*@)+/i, '$1***@')
+  return url.replace(/^([a-z][a-z0-9+.-]*:)?(\/\/)?(?:[^/@]*@)+/i, (_m, scheme, slashes) => `${scheme ?? ''}${slashes ?? ''}***@`)
 }
