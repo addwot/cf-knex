@@ -7,3 +7,6 @@ coverage/
 *.log
 .DS_Store
 .superpowers/
+
+# Superpowers working docs (specs/plans/notes) — local only, never published
+docs/superpowers/
