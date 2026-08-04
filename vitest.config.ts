@@ -11,8 +11,7 @@ export default defineConfig({
         // never host environment variables. This config file itself runs
         // in Node, so it can read process.env and forward the value into
         // the worker as a binding. This is the required pattern for any
-        // test that needs a live connection URL inside workerd (Tasks
-        // 7-11 will reuse it).
+        // test that needs a live connection URL inside workerd.
         //
         // Why the fallback is `''`, not a URL: spec §5.3 requires that an
         // absent connection URL make a conformance test skip with a
@@ -27,10 +26,11 @@ export default defineConfig({
         //   cp .env.example .env && export $(grep -v '^#' .env | xargs) && pnpm test
         // or set it inline per invocation:
         //   MYSQL_URL=mysql://root:root@127.0.0.1:3306/cf_knex_test pnpm test
-        // (No .env auto-loading is wired up on purpose — not a dependency
-        // decision to make silently. Internal working notes, not in this
-        // repo, have the fuller rationale if you go looking for it and it's
-        // gone.)
+        // (No .env auto-loading is wired up here on purpose: nothing
+        // currently consumes this binding, and whether to add one — e.g.
+        // via Vite's loadEnv(), already available transitively through
+        // vitest — is a call for whoever first needs it, not something to
+        // default into silently.)
         //
         // Known limitation: @cloudflare/vitest-pool-workers cannot import
         // `mysql2` or `pg` at all — both are CJS packages with dual
