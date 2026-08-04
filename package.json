@@ -1,0 +1,55 @@
+{
+  "name": "cf-knex",
+  "version": "0.1.0",
+  "description": "Knex for Cloudflare Workers — MySQL, TiDB, Postgres, D1 and Turso, direct or via Hyperdrive",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "packageManager": "pnpm@9.12.0",
+  "repository": { "type": "git", "url": "git+https://github.com/addwot/cf-knex.git" },
+  "keywords": ["knex", "cloudflare", "workers", "d1", "hyperdrive", "tidb", "turso", "mysql", "postgres", "edge"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "test:live": "vitest run test/live",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "size": "size-limit",
+    "check:package": "publint && attw --pack ."
+  },
+  "peerDependencies": {
+    "knex": "^3.1.0",
+    "mysql2": ">=3.9.0",
+    "pg": ">=8.11.0",
+    "@tidbcloud/serverless": ">=0.2.0",
+    "@libsql/client": ">=0.14.0"
+  },
+  "peerDependenciesMeta": {
+    "mysql2": { "optional": true },
+    "pg": { "optional": true },
+    "@tidbcloud/serverless": { "optional": true },
+    "@libsql/client": { "optional": true }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@eslint/js": "9.39.0",
+    "eslint": "9.39.0",
+    "typescript-eslint": "8.47.0",
+    "@size-limit/preset-small-lib": "11.2.0",
+    "size-limit": "11.2.0",
+    "@cloudflare/vitest-pool-workers": "0.20.1",
+    "@cloudflare/workers-types": "5.20260804.1",
+    "@libsql/client": "0.17.4",
+    "@tidbcloud/serverless": "0.3.0",
+    "knex": "3.3.0",
+    "mysql2": "3.23.2",
+    "pg": "8.22.0",
+    "publint": "0.3.23",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10",
+    "wrangler": "4.118.0"
+  }
+}

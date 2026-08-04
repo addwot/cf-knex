@@ -1,0 +1,12 @@
+{
+  "name": "cf-knex-test",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "cf-knex-test", "database_id": "00000000-0000-0000-0000-000000000000" }
+  ],
+  "hyperdrive": [
+    { "binding": "HYPERDRIVE_MYSQL", "id": "cf-knex-test-mysql", "localConnectionString": "mysql://root:root@127.0.0.1:3306/cf_knex_test" },
+    { "binding": "HYPERDRIVE_PG", "id": "cf-knex-test-pg", "localConnectionString": "postgres://postgres:postgres@127.0.0.1:5432/cf_knex_test" }
+  ]
+}

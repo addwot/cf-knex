@@ -1,0 +1,27 @@
+services:
+  mysql:
+    image: mysql:8
+    ports: ['3306:3306']
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: cf_knex_test
+    healthcheck: { test: ['CMD', 'mysqladmin', 'ping', '-proot'], interval: 5s, retries: 20 }
+  mariadb:
+    image: mariadb:11
+    ports: ['3307:3306']
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: cf_knex_test
+    healthcheck: { test: ['CMD', 'healthcheck.sh', '--connect'], interval: 5s, retries: 20 }
+  postgres:
+    image: postgres:16
+    ports: ['5432:5432']
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cf_knex_test
+    healthcheck: { test: ['CMD-SHELL', 'pg_isready -U postgres'], interval: 5s, retries: 20 }
+  libsql:
+    image: ghcr.io/tursodatabase/libsql-server:latest
+    ports: ['8080:8080']
+    environment:
+      SQLD_NODE: primary
