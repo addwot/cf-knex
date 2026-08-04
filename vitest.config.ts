@@ -17,8 +17,20 @@ export default defineConfig({
         // mysql2 cannot be loaded inside this test pool at all, a tooling
         // limitation, not a product one). Left in place for Tasks 7-11,
         // which need this exact pattern for their own live-connection tests.
+        //
+        // The fallback is `''`, NOT a hardcoded local URL. Spec §5.3
+        // requires that an absent connection URL make a conformance test
+        // skip with a printed notice, never silently pass or attempt a real
+        // connection. `env.MYSQL_URL` presence-checking (`if (!env.MYSQL_URL)
+        // skip(...)`) is that skip signal for every later task's tests
+        // (Tasks 7-11) — a non-empty default here would make the check
+        // always truthy and defeat it, turning "no container running" into
+        // a confusing ECONNREFUSED instead of an honest skip. To run these
+        // tests locally, set MYSQL_URL yourself (see
+        // docs/superpowers/notes/2026-08-04-workerd-spike.md's "Notes on
+        // running tests going forward" for how).
         bindings: {
-          MYSQL_URL: process.env.MYSQL_URL ?? 'mysql://root:root@127.0.0.1:3306/cf_knex_test',
+          MYSQL_URL: process.env.MYSQL_URL ?? '',
         },
       },
     }),
