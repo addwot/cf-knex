@@ -41,3 +41,24 @@ test('sqlite inserts return lastID', async () => {
   const db = createKnexClient(adapter)
   expect(await db('users').insert({ name: 'x' })).toEqual([5])
 })
+
+test('constructing a sqlite client does not throw (colorette/logger regression)', () => {
+  // Regression coverage for a real crash: knex's sqlite3 dialect calls
+  // `this.logger.warn(...)` at construction time unless `connection.filename`
+  // and `useNullAsDefault` are already set, and knex's Logger crashes on any
+  // warn/error/deprecate call in this project's test harness (a `colorette`
+  // bundling gap — see the long comment above `DIALECT_CLASSES` in
+  // src/core/client.ts). createKnexClient defaults both settings away for
+  // sqlite specifically so that call is never reached. This test exercises
+  // that through the real, unmodified default path — no config overrides —
+  // so it fails if that default-avoidance regresses.
+  //
+  // NOTE: this does *not* prove the underlying colorette/logger crash is
+  // fixed — only that this specific call site is avoided. An attempt to
+  // write the stronger test the crash's absence would actually require
+  // (forcing sqlite3's constructor warn to fire, e.g. via
+  // `{ connection: {}, useNullAsDefault: undefined }`, and asserting it
+  // doesn't throw) still fails as of this commit; see src/core/client.ts.
+  const { adapter } = createFakeAdapter({ dialect: 'sqlite' })
+  expect(() => createKnexClient(adapter)).not.toThrow()
+})
