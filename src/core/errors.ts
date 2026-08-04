@@ -6,6 +6,7 @@ export type CfKnexErrorCode =
   | 'MISSING_DRIVER'
   | 'UNSUPPORTED_CAPABILITY'
   | 'INCOMPATIBLE_KNEX'
+  | 'MALFORMED_DRIVER_RESULT'
 
 export class CfKnexError extends Error {
   readonly code: CfKnexErrorCode
@@ -22,5 +23,9 @@ export class CfKnexError extends Error {
 
   static unsupported(driver: string, capability: string, hint: string): CfKnexError {
     return new CfKnexError('UNSUPPORTED_CAPABILITY', `${capability} is not supported by the ${driver} driver. ${hint}`)
+  }
+
+  static malformedResult(detail: string): CfKnexError {
+    return new CfKnexError('MALFORMED_DRIVER_RESULT', `driver returned a malformed result: ${detail}`)
   }
 }
