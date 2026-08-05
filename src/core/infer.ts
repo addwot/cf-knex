@@ -44,7 +44,7 @@ export function inferDriver(config: ClientConfig): DriverName {
 
 function infer(config: ClientConfig): DriverName {
   if (config.binding !== undefined) {
-    // §4.2 row 1 is "binding is a D1Database", not "binding is present" — a
+    // The rule is "binding is a D1Database", not "binding is present" — a
     // KV or R2 binding dropped into the wrong config field (an easy mistake
     // in a Workers project with several binding types) must fail here, with
     // a message that says what's wrong, rather than defer to a raw
@@ -71,7 +71,7 @@ function infer(config: ClientConfig): DriverName {
     // libsql is the only driver that takes an authToken. A mysql/postgres
     // url alongside one isn't a libsql url with an extra field — it's the
     // wrong url, most plausibly pasted from a different environment's
-    // config. §4.3 requires throwing on anything unresolvable rather than
+    // config. This package throws on anything unresolvable rather than
     // silently guessing, and guessing 'libsql' here would pass validation
     // and fail much later, unactionably, inside the adapter instead.
     if (scheme === 'mysql' || scheme === 'postgres' || scheme === 'postgresql') {

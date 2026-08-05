@@ -90,7 +90,7 @@ test('rejects authToken paired with a postgres:// url', () => {
 
 test('rejects a binding that is present but not D1-shaped', () => {
   // A KV-namespace-shaped binding dropped into the wrong config field —
-  // §4.2 row 1 requires the binding to actually be a D1Database, not merely
+  // inference requires the binding to actually be a D1Database, not merely
   // present.
   const err = catchCfKnexError(() => inferDriver({ engine: 'sqlite', binding: { get: () => {}, put: () => {} } }))
   expect(err.code).toBe('UNKNOWN_DRIVER')
