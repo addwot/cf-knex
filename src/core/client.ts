@@ -9,6 +9,86 @@ import { CfKnexError } from './errors'
 import { toKnexResponse } from './response'
 import type { Dialect, DriverAdapter } from './types'
 
+/**
+ * The subset of Node's `Writable` interface `_stream()` below needs. knex's
+ * own `Runner.stream()` (node_modules/knex/lib/execution/runner.js) always
+ * builds this as a real `Transform` (`new Transform({ objectMode: true, ...
+ * })`) and passes it through `Client.prototype.stream()` →
+ * `_stream(connection, queryObject, stream, options)`
+ * (node_modules/knex/lib/client.js), so at runtime this is always a genuine
+ * Node stream. This project has no `@types/node` dependency and deliberately
+ * keeps it that way (see test/process.d.ts for the same constraint applied
+ * to `process`) — `src` is imported by both the `workers` and `node` vitest
+ * projects (see vitest.config.ts), and this file in particular is the one
+ * every adapter, including the workerd-only ones, is wired through, so
+ * pulling in the full Node stream surface here would be misleading. Declare
+ * only the members actually called below, the same shim-over-untyped-import
+ * pattern src/adapters/mysql2.ts's `Mysql2ConnectionShim` uses.
+ */
+type StreamSink = {
+  readonly destroyed: boolean
+  write(chunk: unknown): boolean
+  end(): void
+  emit(event: 'error', err: unknown): boolean
+  once(event: 'drain', listener: () => void): void
+  once(event: 'close', listener: () => void): void
+  once(event: 'error', listener: (err: unknown) => void): void
+  off(event: 'drain', listener: () => void): void
+  off(event: 'close', listener: () => void): void
+  off(event: 'error', listener: (err: unknown) => void): void
+}
+
+/**
+ * Thrown internally by `waitForDrain` — never surfaced to a caller — when
+ * the destination stream closes on its own instead of draining. Node's
+ * `Readable` async-iterator protocol destroys the stream a consumer is
+ * `for await`-ing as soon as that consumer stops early (a `break`, e.g.
+ * `for await (const row of db(t).stream()) { if (done) break }`), and does
+ * so without ever emitting 'drain' again — verified empirically (a `Transform`
+ * destroyed this way emits 'close', and in that specific case also 'error',
+ * but never another 'drain'). A write loop that only waited on 'drain' would
+ * hang forever the moment backpressure and an early consumer exit coincide.
+ * This being a distinct type (not a plain rejection) is what lets the catch
+ * block below tell "the consumer walked away, stop quietly" apart from a
+ * real failure that must reject `_stream()`'s own promise and be reported.
+ */
+class StreamSinkClosed extends Error {}
+
+/**
+ * Resolves once `stream` emits 'drain', or rejects/resolves once it becomes
+ * clear no 'drain' is coming — see `StreamSinkClosed` above for why both
+ * outcomes exist. `stream.destroyed` is checked up front for the same reason:
+ * a stream already destroyed before this is even called (the consumer left
+ * between one write and the next) will not emit a fresh 'close' for a
+ * listener attached after the fact, and 'close'/'drain' both being events
+ * `EventEmitter` only fires forward in time, never replays past
+ * ones — waiting on them unconditionally would hang exactly as long as never
+ * checking `destroyed` at all.
+ */
+function waitForDrain(stream: StreamSink): Promise<void> {
+  if (stream.destroyed) return Promise.reject(new StreamSinkClosed())
+  return new Promise<void>((resolve, reject) => {
+    const onDrain = () => {
+      stream.off('error', onError)
+      stream.off('close', onClose)
+      resolve()
+    }
+    const onError = (err: unknown) => {
+      stream.off('drain', onDrain)
+      stream.off('close', onClose)
+      reject(err)
+    }
+    const onClose = () => {
+      stream.off('drain', onDrain)
+      stream.off('error', onError)
+      reject(new StreamSinkClosed())
+    }
+    stream.once('drain', onDrain)
+    stream.once('error', onError)
+    stream.once('close', onClose)
+  })
+}
+
 // Static imports (not `createRequire`) so these paths are visible to the
 // bundler and a resolution failure surfaces at import time.
 //
@@ -119,8 +199,66 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       return toKnexResponse(adapter.dialect, raw, obj)
     }
 
-    _stream() {
-      throw CfKnexError.unsupported(adapter.driver, 'streaming', 'Use .limit()/.offset() to paginate.')
+    // `adapter.capabilities.streaming` on its own is only a claim; `adapter.
+    // stream` existing is the proof. Gating on both is what stops a
+    // future adapter that sets the flag without ever implementing the
+    // method from reaching `adapter.stream(...)` below and crashing on
+    // "not a function" instead of failing with this file's own typed error
+    // (see src/core/types.ts's `DriverAdapter.stream` doc — this is the
+    // same reasoning `validateConnection` above already applies to
+    // `adapter.validate`).
+    //
+    // Must return a Promise that genuinely settles on the outcome of the
+    // stream, not merely a Promise that always resolves once some async work
+    // runs: knex's `Runner.ensureConnection` (node_modules/knex/lib/
+    // execution/runner.js) awaits exactly what this returns before releasing
+    // the connection back to the pool, and knex's own postgres `_stream`
+    // (node_modules/knex/lib/dialects/postgres/index.js) — the contract this
+    // matches — resolves on completion, rejects on error, and emits on the
+    // stream in the error case as well, all three. A version that only ever
+    // resolves (or only ever emits on the stream without also rejecting)
+    // would let a caller who `await`s `db(t).stream()`'s returned promise
+    // see success on a stream that actually failed partway through.
+    _stream(handle: unknown, obj: Record<string, unknown>, stream: StreamSink): Promise<void> {
+      if (!adapter.capabilities.streaming || !adapter.stream) {
+        throw CfKnexError.unsupported(adapter.driver, 'streaming', adapter.hints?.streaming ?? 'Use .limit()/.offset() to paginate.')
+      }
+      // Both stock dialects this adapter's streaming replaces guard this
+      // identically — node_modules/knex/lib/dialects/postgres/index.js's
+      // `_stream` and node_modules/knex/lib/dialects/mysql/index.js's
+      // `_stream` (the mysql2 dialect inherits it unchanged) both open with
+      // `if (!obj.sql) throw new Error('The query is empty')` — a
+      // synchronous throw, not a rejected promise. knex's own
+      // `ensureConnectionStreamCallback` (node_modules/knex/lib/execution/
+      // internal/ensure-connection-callback.js) wraps the call this method
+      // is reached through in a try/catch specifically to turn a synchronous
+      // throw here into a `stream.emit('error', …)` plus a normal rejection,
+      // so matching the stock dialects' exact shape (rather than inventing a
+      // resolved-promise no-op instead) is what stays inside that already-
+      // handled path.
+      if (!obj.sql) throw new Error('The query is empty')
+
+      const rows = adapter.stream(handle, obj.sql as string, (obj.bindings as unknown[]) ?? [])
+      return (async () => {
+        try {
+          for await (const row of rows) {
+            // A `false` return means the sink's internal buffer is full and
+            // it has not caught up — writing the next row anyway (the
+            // original draft of this method did) buffers the entire result
+            // set in `stream`'s own memory the moment the consumer falls
+            // behind for even one row, which defeats the only reason to
+            // stream in the first place. `waitForDrain` also resolves the
+            // race the other way (the sink closing instead of draining) so
+            // this can never hang forever on a consumer that already left.
+            if (!stream.write(row)) await waitForDrain(stream)
+          }
+          stream.end()
+        } catch (err) {
+          if (err instanceof StreamSinkClosed) return
+          stream.emit('error', err)
+          throw err
+        }
+      })()
     }
 
     // knex's own `Client.transaction()` (node_modules/knex/lib/client.js)
@@ -144,7 +282,8 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
           CfKnexError.unsupported(
             adapter.driver,
             'transactions',
-            'Each query executes as an independent request against this driver, so BEGIN/COMMIT/ROLLBACK cannot be guaranteed to share a session.',
+            adapter.hints?.transactions ??
+              'Each query executes as an independent request against this driver, so BEGIN/COMMIT/ROLLBACK cannot be guaranteed to share a session.',
           ),
         )
       }

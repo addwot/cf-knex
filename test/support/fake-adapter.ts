@@ -1,4 +1,4 @@
-import type { AdapterCapabilities, Dialect, DriverAdapter, RawResult } from '../../src/core/types'
+import type { AdapterCapabilities, CapabilityHints, Dialect, DriverAdapter, RawResult } from '../../src/core/types'
 
 export function createFakeAdapter(opts: {
   dialect: Dialect
@@ -21,6 +21,22 @@ export function createFakeAdapter(opts: {
   // an adapter declares `capabilities.transactions: false`) doesn't have to
   // restate the other.
   capabilities?: Partial<AdapterCapabilities>
+  // Passed straight through to the returned adapter's own `hints`. Omitted
+  // entirely unless supplied — same "omit, don't set to `undefined`"
+  // contract `DriverAdapter.hints` itself documents (src/core/types.ts) —
+  // so a test asserting today's generic hint wording doesn't have to
+  // special-case this option too.
+  hints?: CapabilityHints
+  // Gives this adapter a real `stream()` without a database — e.g. a small
+  // async generator yielding fixed rows, or one that throws partway through
+  // to exercise `_stream()`'s error/backpressure paths. Omitted entirely
+  // unless supplied, matching `capabilities.streaming` defaulting to
+  // `false` below: most of this suite needs a `DriverAdapter` with no
+  // `stream` method at all, and `_stream()` (src/core/client.ts) is
+  // specifically required to gate on *both* `capabilities.streaming` and
+  // `stream`'s presence — a test that sets one without the other exercises
+  // that gate directly.
+  stream?: DriverAdapter['stream']
 }) {
   const calls: Array<{ sql: string; bindings: unknown[] }> = []
   // `createKnexClient` (src/core/client.ts) wires `acquire`/`release`/
@@ -39,6 +55,11 @@ export function createFakeAdapter(opts: {
     dialect: opts.dialect,
     driver: 'mysql2',
     capabilities: { streaming: false, transactions: true, ...opts.capabilities },
+    // Spread in at construction, not assigned after like `validate`/`stream`
+    // below: `DriverAdapter.hints` is `readonly` (src/core/types.ts), so an
+    // assignment once `adapter` is already typed as `DriverAdapter` would be
+    // a compile error, not just a style choice.
+    ...(opts.hints ? { hints: opts.hints } : {}),
     acquire: async () => {
       acquireCount++
       const handle = {}
@@ -59,6 +80,9 @@ export function createFakeAdapter(opts: {
   }
   if (opts.invalidateAfterFirstUse) {
     adapter.validate = (handle: unknown) => !usedOnce.has(handle)
+  }
+  if (opts.stream) {
+    adapter.stream = opts.stream
   }
   return {
     adapter,

@@ -16,6 +16,20 @@ export type AdapterCapabilities = {
 }
 
 /**
+ * Adapter-supplied replacement text for `CfKnexError.unsupported`'s hint
+ * argument, keyed by the capability it applies to. `src/core/client.ts`'s
+ * `_stream()` and `transaction()` each hardcode a generic hint ("Use
+ * .limit()/.offset() to paginate.", the BEGIN/COMMIT/ROLLBACK explanation) —
+ * reasonable defaults for an adapter with nothing more specific to say, but
+ * wrong for one that does: an adapter whose real alternative is a named
+ * method (e.g. a batch-style `batch()`) can name it here instead of leaving
+ * the caller to guess. Optional and additive on both sides — a key absent
+ * from this object (or the object absent entirely) falls back to today's
+ * generic wording, unchanged.
+ */
+export type CapabilityHints = Partial<Record<keyof AdapterCapabilities, string>>
+
+/**
  * The connection-lifecycle contract every adapter implements. `createKnexClient`
  * (src/core/client.ts) wires these four methods directly into knex's own
  * tarn-backed pool, at the raw-connection layer (`acquireRawConnection` /
@@ -54,11 +68,18 @@ export type AdapterCapabilities = {
  * object with no underlying session to drop. `createKnexClient` treats a
  * missing `validate` as "always valid", which is correct for those and
  * would be actively wrong to default to a stricter check.
+ *
+ * `hints` is optional for the same reason `validate` is: most adapters have
+ * nothing to add over `_stream()`/`transaction()`'s generic wording in
+ * src/core/client.ts, and omitting it entirely (not just leaving a key
+ * `undefined`) is what keeps those adapters on that generic text byte-for-
+ * byte. Supply only the keys an adapter actually wants to override.
  */
 export type DriverAdapter = {
   readonly dialect: Dialect
   readonly driver: DriverName
   readonly capabilities: AdapterCapabilities
+  readonly hints?: CapabilityHints
   acquire(): Promise<unknown>
   release(handle: unknown): Promise<void>
   validate?(handle: unknown): boolean

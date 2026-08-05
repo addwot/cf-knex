@@ -20,24 +20,46 @@ type Mysql2ConnectionShim = {
 }
 
 /**
- * The subset of mysql2's *internal* connection state this adapter reads to
- * decide whether a pooled handle is still usable — the same four fields
- * knex's own stock mysql2 dialect reads for the same purpose
- * (node_modules/knex/lib/dialects/mysql2/index.js's `validateConnection`).
- * None of these are part of mysql2's public `.d.ts` (they're underscore-
- * prefixed / undocumented); verified directly against
- * node_modules/mysql2/lib/base/connection.js, which sets `_fatalError`/
- * `_protocolError`/`_closing` on protocol errors and dropped sockets, and
- * `stream.destroyed` once the underlying TCP socket is gone. `mysql2/promise`'s
- * `Connection` wraps this raw connection at `.connection` — one layer deeper
- * than knex's own dialect reads, since knex talks to the raw connection
- * directly and this adapter hands out the promise wrapper instead.
+ * The subset of mysql2's *internal* connection state this adapter reads
+ * directly off the raw (non-promise) connection — `mysql2/promise`'s own
+ * `Connection` wraps it at `.connection` (node_modules/mysql2/lib/promise/
+ * connection.js: `this.connection = connection`), one layer under the
+ * promise wrapper this adapter otherwise hands out. Two unrelated uses share
+ * this type:
+ *
+ * - `validate()` below reads `_fatalError`/`_protocolError`/`_closing`/
+ *   `stream.destroyed` — the same four fields knex's own stock mysql2
+ *   dialect reads for the same purpose
+ *   (node_modules/knex/lib/dialects/mysql2/index.js's `validateConnection`).
+ *   None of these are part of mysql2's public `.d.ts` (they're underscore-
+ *   prefixed / undocumented); verified directly against
+ *   node_modules/mysql2/lib/base/connection.js, which sets `_fatalError`/
+ *   `_protocolError`/`_closing` on protocol errors and dropped sockets, and
+ *   `stream.destroyed` once the underlying TCP socket is gone. (That
+ *   `stream` is the raw TCP socket — unrelated to `query(…).stream()`
+ *   below, which is a row stream over one query's results, not a socket.)
+ * - `stream()` below calls `query()` directly on this same raw connection
+ *   object, with no callback argument. `mysql2/promise`'s own `.query()`
+ *   (lib/promise/connection.js) always passes one through to the raw
+ *   `query(sql, values, cb)` (lib/base/connection.js) and returns a Promise
+ *   that only settles once the whole result is buffered — there is no route
+ *   to a row stream through it. The raw connection's `query()`, called with
+ *   no callback, instead returns the `Query` command object itself,
+ *   synchronously (`lib/base/connection.js`: with no `cb`, `createQuery`
+ *   leaves `cmdQuery.onResult` unset, and `query()`'s last line is `return
+ *   cmdQuery`) — the same object `Query.prototype.stream()`
+ *   (lib/commands/query.js) hangs off, and the exact path knex's own mysql
+ *   dialect's `_stream` uses (node_modules/knex/lib/dialects/mysql/index.js,
+ *   inherited unchanged by the mysql2 dialect since it never overrides
+ *   `_stream` itself): `connection.query(queryOptions,
+ *   obj.bindings).stream(options)`.
  */
 type RawMysql2Connection = {
   _fatalError: unknown
   _protocolError: unknown
   _closing: boolean
   stream: { destroyed: boolean }
+  query(sql: string, values: unknown[]): { stream(): AsyncIterable<unknown> }
 }
 
 /**
@@ -215,6 +237,61 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
       const conn = handle as unknown as Mysql2ConnectionShim
       const [rows, fields] = await conn.query(sql, bindings as unknown as QueryValues)
       return toRawResult(rows, fields)
+    },
+
+    // Row-by-row streaming for `db(table).stream()`. src/core/client.ts's
+    // `_stream()` drives this generator with its own `for await`, writing
+    // each yielded row into knex's output stream and awaiting backpressure
+    // there — the backpressure this method is responsible for is the other
+    // side, between mysql2's own row source and this generator, which comes
+    // for free below (see the `.stream()` paragraph).
+    //
+    // `disableEval: true` (set once into `config` above, so every connection
+    // this adapter opens already carries it): mysql2's `Query` command picks
+    // its row parser — `disableEval` gates between `staticParser` and one
+    // built with `new Function` — inside `readField()`
+    // (node_modules/mysql2/lib/commands/query.js:217), a function the
+    // buffered path (`execute()` above) and this streaming path both call
+    // identically. The gate reads `this.options.disableEval`, and
+    // `Query.prototype.start()` builds `this.options` as
+    // `Object.assign({}, connection.config, this._queryOptions)` — `
+    // connection.config` is this adapter's `config` (`disableEval: true`),
+    // and `_queryOptions` (built from this call's own `sql`/`values` by
+    // `createQuery`, same file) never sets `disableEval` itself — so the
+    // connection-level flag reaches every query this adapter issues,
+    // streamed or not, with nothing further to do here. Confirmed against a
+    // live MySQL connection opened with `disableEval: true`: streamed rows
+    // come back fully parsed (numeric columns as `number`, not
+    // `Buffer`/string), matching the buffered path.
+    //
+    // `raw.query(sql, values)`: see the `RawMysql2Connection` comment above
+    // for why calling `query()` on the *raw* connection with no callback —
+    // rather than `mysql2/promise`'s own `.query()`, used by `execute()`
+    // above — is what's needed to reach `.stream()` at all. `.stream()`
+    // returns a real Node `Readable` in object mode
+    // (node_modules/mysql2/lib/commands/query.js) that already pauses and
+    // resumes the underlying connection based on its own internal buffer
+    // (that file's `push()` call and its return value) — the same
+    // pause/resume flow control a `Readable`'s async-iterator protocol
+    // always uses to pull one chunk at a time, so `for await` below already
+    // only pulls a new row once this generator's own consumer is ready for
+    // one; there is nothing extra to add for backpressure on this side.
+    //
+    // Early exit: if src/core/client.ts's `_stream()` stops consuming this
+    // generator early (its own consumer's stream closed while awaiting
+    // drain — see its `StreamSinkClosed` handling), the abandoned `for
+    // await` below is closed the way Node's stream docs describe for any
+    // `for await` over a `Readable`: breaking out invokes the async
+    // iterator's `return()`, which calls `readable.destroy()`. Confirmed
+    // empirically here too, against a live connection: breaking out of a
+    // streaming read after 2 of 5 rows left the connection accepting a
+    // further query and returning the correct result — mysql2 does not
+    // leave the connection wedged mid-result-set when its stream is
+    // abandoned this way.
+    async *stream(handle, sql, bindings) {
+      const raw = (handle as unknown as { connection: RawMysql2Connection }).connection
+      const readable = raw.query(sql, bindings).stream()
+      for await (const row of readable) yield row
     },
 
     async destroy(): Promise<void> {

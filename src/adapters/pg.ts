@@ -20,7 +20,7 @@ import type { Credentials, DriverAdapter, RawResult } from '../core/types'
  */
 type PgClientShim = {
   connect(): Promise<void>
-  query(sql: string, values: unknown[]): Promise<PgResult>
+  query(sql: string, values?: unknown[]): Promise<PgResult>
   end(): Promise<void>
   on(event: 'error', listener: (err: Error) => void): void
 }
@@ -173,6 +173,12 @@ export function resolveConfig(opts: PgAdapterOptions): Record<string, unknown> {
   throw new CfKnexError('NO_CONNECTION', "pg adapter needs one of 'url', 'connection' or 'hyperdrive'")
 }
 
+// Row batch size for the `FETCH` loop inside `stream()` below — how many
+// rows cross the wire per round trip, not a cap on total rows streamed.
+// Unremarkable and not tuned for this task; a caller with different memory/
+// latency tradeoffs has no way to override it today.
+const FETCH_BATCH_SIZE = 100
+
 export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   const config = resolveConfig(opts)
 
@@ -184,6 +190,21 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // usually be empty by then; `destroy()` below is the safety net for
   // whatever's left.
   const open = new Set<PgClientShim>()
+
+  // `stream()` below names every savepoint/cursor it creates
+  // `cf_knex_sp_<n>` / `cf_knex_cur_<n>` off this counter, shared across
+  // every connection this adapter instance ever hands out. A fixed literal
+  // name instead of this would collide the moment two `stream()` calls
+  // overlap on the same connection (a caller not awaiting one `.stream()`
+  // before starting another inside the same `db.transaction()` callback) —
+  // confirmed directly, live: declaring a second cursor with a name already
+  // open on the same connection fails with `cursor "…" already exists`
+  // (SQLSTATE 42P03). A plain incrementing integer sidesteps this
+  // (guaranteed distinct for the process's lifetime) and, since it is never
+  // built from caller input, gives a SQL-injection surface no chance to
+  // exist in the first place — the identifier is 100% this adapter's own
+  // text.
+  let cursorSeq = 0
 
   return {
     dialect: 'postgres',
@@ -263,6 +284,142 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
       const client = handle as PgClientShim
       const res = await client.query(sql, bindings)
       return toRawResult(res)
+    },
+
+    // Row-by-row streaming for `db(table).stream()`, over a real server-side
+    // cursor (`DECLARE … CURSOR FOR` / `FETCH` / `CLOSE`) rather than
+    // buffering the whole result — the entire reason `.stream()` exists as a
+    // capability distinct from `execute()`. src/core/client.ts's `_stream()`
+    // drives this generator with its own `for await`, writing each yielded
+    // row into knex's output stream and awaiting backpressure there.
+    //
+    // Cursors only exist inside a transaction, and postgres requires
+    // `BEGIN` first if the connection is not already inside one — but
+    // whether it already is depends on the caller: a plain `db(t).stream()`
+    // hands this method a fresh, idle connection, while `db.transaction(trx
+    // => trx(t).stream())` hands it a connection already mid-transaction
+    // (the same one the whole callback shares). Issuing `BEGIN`
+    // unconditionally, without checking which case this is, is genuinely
+    // dangerous, not just redundant: postgres does not reject a nested
+    // `BEGIN` (it only emits a NOTICE, "there is already a transaction in
+    // progress" — confirmed live), so nothing signals the mistake, and this
+    // method's own teardown would then `COMMIT` a transaction it did not
+    // open — ending the *caller's* transaction early. Confirmed live: with
+    // an outer `BEGIN` and an uncommitted insert already issued, running
+    // this sequence nested inside it and letting it reach its own `COMMIT`
+    // made the outer, still-in-progress insert visible to a second
+    // connection immediately — before the outer caller ever committed
+    // anything itself.
+    //
+    // Detecting "already in a transaction" needs to be both correct across
+    // every pg version this package supports (`peerDependencies.pg` is
+    // `>=8.11.0`) and not itself racy. `Client.prototype.getTransactionStatus()`
+    // fails both: it does not exist before pg 8.21.0 (an older peer would
+    // throw `TypeError: client.getTransactionStatus is not a function` the
+    // first time `.stream()` ran), and even on a version that has it, it can
+    // read stale, one-message-behind state immediately after an awaited
+    // query's own promise has already rejected — reproduced directly:
+    // reading it right after a caught `DECLARE` failure returned "T"
+    // (nominally still fine) on one run and "E" (aborted) on another,
+    // for the identical code path, because `_handleReadyForQuery`
+    // (node_modules/pg/lib/client.js) updates that field from a separate,
+    // later protocol message than the one that rejects the query's promise.
+    // What this method uses instead needs no version-gated API and no
+    // separately-timed message: attempt `SAVEPOINT <marker>` with nothing
+    // before it. Postgres itself answers the nested-or-not question as a
+    // side effect of that one statement — no probe query, no extra round
+    // trip in the already-in-a-transaction case: it succeeds if a
+    // transaction is already open (and `<marker>` is now a real savepoint
+    // this method can roll back to or release later), or fails with
+    // SQLSTATE 25P01 ("SAVEPOINT can only be used in transaction blocks")
+    // if not, confirmed live on a fresh idle connection — a stable,
+    // documented error code, not translatable NOTICE/error text this method
+    // would otherwise have to match locale-sensitively. Only the not-
+    // already-in-a-transaction branch issues `BEGIN`, and only after that
+    // negative has actually been confirmed.
+    //
+    // The `finally` block below is deliberately not the same three calls
+    // regardless of outcome. The original shape this replaced — an
+    // unconditional `CLOSE` then `COMMIT`, every time, success or failure —
+    // masks the *real* error on any failure: confirmed live, once `DECLARE`
+    // (or a `FETCH`) fails, the transaction enters postgres's aborted state,
+    // and an unguarded `CLOSE` issued after that fails too, with SQLSTATE
+    // 25P02 ("current transaction is aborted, commands ignored until end of
+    // transaction block") — thrown from inside an unguarded `finally` block,
+    // that replaces whatever the actually-useful original error was (a
+    // missing table, a bad column, …) with this generic one, and the caller
+    // never learns what really went wrong. This method tracks whether the
+    // work actually failed and branches on it: failure-path cleanup
+    // (`CLOSE`, `ROLLBACK TO SAVEPOINT`, the outer `ROLLBACK` when this
+    // method opened its own transaction) is best-effort — each swallows its
+    // own error — specifically so a secondary failure while cleaning up
+    // can never replace the original rejection this generator must still
+    // throw; success-path cleanup (`RELEASE SAVEPOINT`, the outer `COMMIT`)
+    // is not swallowed, because silently failing to commit successful work
+    // would be a different, equally real version of the same bug the
+    // above avoids the other way round: a caller told nothing went wrong
+    // when the work was, in fact, never durably finished. An early exit —
+    // this generator's own consumer (`_stream()`) stops pulling before the
+    // cursor is exhausted — reaches the same `finally` block through the
+    // ordinary `for-await-of` teardown path (an abandoned loop's iterator
+    // gets `.return()` called on it, which resumes this generator at its
+    // current suspension point as a `return`), with `failed` left `false`:
+    // stopping early because a consumer lost interest is not a failure, and
+    // the fetched-so-far work is real work that should still be committed,
+    // not rolled back.
+    //
+    // Bind params inside `DECLARE … CURSOR FOR <select>` (as opposed to a
+    // plain `execute()`-style query): confirmed live — `DECLARE cur CURSOR
+    // FOR SELECT * FROM t WHERE id > $1 AND id < $2` with values `[1, 4]`
+    // resolved both placeholders correctly. Postgres parses and plans the
+    // wrapped statement the same way whether or not a `DECLARE … CURSOR FOR`
+    // sits in front of it, so this needs no different handling from
+    // `execute()`'s own `client.query(sql, bindings)` call above.
+    async *stream(handle, sql, bindings) {
+      const client = handle as PgClientShim
+      const marker = `cf_knex_sp_${++cursorSeq}`
+      const cursorName = `cf_knex_cur_${cursorSeq}`
+
+      let nested: boolean
+      try {
+        await client.query(`SAVEPOINT ${marker}`)
+        nested = true
+      } catch (err) {
+        if ((err as { code?: string }).code !== '25P01') throw err
+        nested = false
+        await client.query('BEGIN')
+        await client.query(`SAVEPOINT ${marker}`)
+      }
+
+      let cursorOpen = false
+      let failed = false
+      try {
+        await client.query(`DECLARE ${cursorName} CURSOR FOR ${sql}`, bindings)
+        cursorOpen = true
+        for (;;) {
+          const res = await client.query(`FETCH ${FETCH_BATCH_SIZE} FROM ${cursorName}`)
+          if (res.rows.length === 0) break
+          yield* res.rows
+        }
+      } catch (err) {
+        failed = true
+        throw err
+      } finally {
+        if (cursorOpen) await client.query(`CLOSE ${cursorName}`).catch(() => {})
+        if (failed) {
+          await client.query(`ROLLBACK TO SAVEPOINT ${marker}`).catch(() => {})
+          // Tidiness, not correctness: confirmed live that the transaction
+          // is already healthy again right after `ROLLBACK TO SAVEPOINT`
+          // alone, with or without this. Best-effort for the same reason as
+          // the rest of this block — it must never be the call that ends up
+          // masking the original error.
+          await client.query(`RELEASE SAVEPOINT ${marker}`).catch(() => {})
+          if (!nested) await client.query('ROLLBACK').catch(() => {})
+        } else {
+          await client.query(`RELEASE SAVEPOINT ${marker}`)
+          if (!nested) await client.query('COMMIT')
+        }
+      }
     },
 
     async destroy(): Promise<void> {
