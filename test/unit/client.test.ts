@@ -198,7 +198,7 @@ test('_stream() throws CfKnexError even when capabilities.streaming is true, if 
   }
 })
 
-test('_stream() uses the adapter-supplied streaming hint when present, and the generic wording when absent (A6)', () => {
+test('_stream() uses the adapter-supplied streaming hint when present, and the generic wording when absent', () => {
   const { adapter: generic } = createFakeAdapter({ dialect: 'mysql' })
   const dbGeneric = createKnexClient(generic)
   const clientGeneric = dbGeneric.client as unknown as { _stream: () => unknown }
@@ -404,7 +404,7 @@ test('db.transaction() rejects with a documented CfKnexError when the adapter de
   await db.destroy()
 })
 
-test('db.transaction() uses the adapter-supplied transactions hint when present, and the generic wording when absent (A6)', async () => {
+test('db.transaction() uses the adapter-supplied transactions hint when present, and the generic wording when absent', async () => {
   const { adapter: generic } = createFakeAdapter({ dialect: 'mysql', capabilities: { transactions: false } })
   const dbGeneric = createKnexClient(generic)
   await expect(dbGeneric.transaction(async () => {})).rejects.toThrow(/BEGIN\/COMMIT\/ROLLBACK/)
