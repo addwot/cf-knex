@@ -31,7 +31,7 @@ function createFakeSink(opts: { writeReturns?: boolean[] } = {}) {
   // distinguishable is what lets a test tell "the sink itself naturally
   // emitted an abort on destroy" (expected, not a bug) apart from "`_stream()`'s
   // own code additionally, redundantly re-emitted on top of it" (the actual
-  // regression Finding 3 is about — see the test below).
+  // regression the test below covers — see its own comment).
   let emitCalls = 0
   const listeners: Record<'drain' | 'close' | 'error', Set<(err?: unknown) => void>> = {
     drain: new Set(),
@@ -337,7 +337,7 @@ test('_stream() rejects and emits on the sink when the adapter stream throws mid
   expect(written).toEqual([{ id: 1 }])
 })
 
-test('_stream() resolves quietly (no throw, no re-emit) when the sink closes while awaiting drain (early-exit teardown, A5/Finding 3)', async () => {
+test('_stream() resolves quietly (no throw, no re-emit) when the sink closes while awaiting drain (early-exit teardown)', async () => {
   // Regression coverage for the deadlock/false-rejection this specifically
   // guards against: a consumer stopping early (e.g. `break` inside a
   // `for await` over the real stream) destroys it — and, confirmed live
@@ -346,13 +346,13 @@ test('_stream() resolves quietly (no throw, no re-emit) when the sink closes whi
   // (`createFakeSink`'s `destroyNow()` reproduces that exact sequence, not
   // a simplified close-only one — see its comment). A naive drain-wait that
   // only listens for 'drain' would hang forever; one that treats *every*
-  // 'error' as a real failure (the actual Finding 3 regression: this test
-  // used to pass against a fake sink that never fired 'error' on destroy at
-  // all, so it never exercised this) would reject `_stream()`'s promise and
-  // `emit('error', …)` a *second* time over a consumer simply losing
-  // interest, which is not a failure — `emitCallCount()` below checks for
-  // exactly that second, redundant emission from `_stream()`'s own code,
-  // separately from the sink's own natural one `destroyNow()` fires.
+  // 'error' as a real failure (this test's whole reason to exist: an earlier
+  // fake sink here never fired 'error' on destroy at all, so nothing ever
+  // exercised this) would reject `_stream()`'s promise and `emit('error', …)`
+  // a *second* time over a consumer simply losing interest, which is not a
+  // failure — `emitCallCount()` below checks for exactly that second,
+  // redundant emission from `_stream()`'s own code, separately from the
+  // sink's own natural one `destroyNow()` fires.
   const { adapter } = createFakeAdapter({
     dialect: 'mysql',
     capabilities: { streaming: true },
@@ -377,6 +377,56 @@ test('_stream() resolves quietly (no throw, no re-emit) when the sink closes whi
   await expect(done).resolves.toBeUndefined()
   expect(emitCallCount()).toBe(0)
   expect(written).toEqual([{ id: 1 }])
+})
+
+test('_stream() also resolves quietly when a natural drain and the sink closing race each other', async () => {
+  // The test above covers 'error' arriving while `waitForDrain` is still
+  // waiting for the *first* 'drain'. There is a second, untested half of the
+  // same window: confirmed live against a real backpressured `Transform`
+  // being consumed via `for await`, a natural 'drain' (the sink's buffer
+  // genuinely catching up) can fire *before* an early exit's 'error'/'close'
+  // rather than instead of it — the full observed order is 'drain', then
+  // 'error' (AbortError), then 'close'. When that happens, `waitForDrain`'s
+  // first call resolves via that genuine 'drain', and `_stream()`'s loop
+  // goes straight back to `stream.write()` for the next row while the sink
+  // is not yet destroyed. If that next write is itself still backpressured,
+  // `waitForDrain` is called a *second* time — and it must still resolve
+  // this quietly rather than hang or throw once the sink closes moments
+  // later, exactly like the first call does. `fireDrain()` (unlike
+  // `destroyNow()`) does not touch `destroyed`, so calling it before
+  // `destroyNow()` reproduces this exact ordering rather than the
+  // close-only or single-drain shapes the other tests above already cover.
+  const { adapter } = createFakeAdapter({
+    dialect: 'mysql',
+    capabilities: { streaming: true },
+    stream: async function* () {
+      yield { id: 1 }
+      yield { id: 2 }
+      yield { id: 3 }
+    },
+  })
+  const db = createKnexClient(adapter)
+  const client = db.client as unknown as {
+    _stream: (handle: unknown, obj: Record<string, unknown>, sink: unknown) => Promise<void>
+  }
+  // Both writes report backpressure, so the loop calls `waitForDrain` twice:
+  // once for row 1 (resolved below by the natural `fireDrain()`), once for
+  // row 2 (resolved by `destroyNow()`'s 'error' arriving while still armed).
+  const { sink, written, destroyNow, fireDrain, emitCallCount } = createFakeSink({ writeReturns: [false, false] })
+
+  const done = client._stream({}, { sql: 'select * from t', bindings: [] }, sink)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(written).toEqual([{ id: 1 }])
+
+  fireDrain()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(written).toEqual([{ id: 1 }, { id: 2 }])
+
+  destroyNow()
+
+  await expect(done).resolves.toBeUndefined()
+  expect(emitCallCount()).toBe(0)
+  expect(written).toEqual([{ id: 1 }, { id: 2 }])
 })
 
 test('db.transaction() rejects with a documented CfKnexError when the adapter declares no transaction support', async () => {

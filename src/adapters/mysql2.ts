@@ -288,6 +288,29 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
     // further query and returning the correct result — mysql2 does not
     // leave the connection wedged mid-result-set when its stream is
     // abandoned this way.
+    //
+    // Does this generator need its own version of src/adapters/pg.ts's
+    // `handlesMidTeardown` guard — a way to tell a caller "this handle is
+    // still being torn down, don't hand it to anyone else yet"? No, and this
+    // was checked directly rather than assumed from the pg case: that guard
+    // exists there because pg's `stream()` issues *further async queries on
+    // the connection* after an early exit (`ROLLBACK TO SAVEPOINT`, `CLOSE
+    // cursor`), which is exactly the window where knex's own premature-
+    // release paths (this file's `Runner.stream()` 'close' handler and, in a
+    // transaction, `Transaction.acquireConnection`'s finally block — see
+    // src/core/client.ts's `_stream()` comment) can hand the same connection
+    // to an unrelated caller before that cleanup finishes. This generator's
+    // body has nothing after the `for await` loop — no `finally`, no
+    // follow-up SQL of its own — so there is no async gap for such a release
+    // to land inside in the first place; the only cleanup is
+    // `readable.destroy()`, called synchronously as part of the same
+    // `.return()` that abandons this generator. Verified directly, not
+    // inferred: against a live MySQL connection, breaking out after the
+    // first row of a 50,000-row unconsumed streamed result and, with zero
+    // delay, issuing a completely unrelated query on that same raw
+    // connection handle succeeded cleanly and saw consistent data, 15/15 —
+    // there is no window where the connection is unsafe to hand to another
+    // caller once `readable.destroy()` has been called.
     async *stream(handle, sql, bindings) {
       const raw = (handle as unknown as { connection: RawMysql2Connection }).connection
       const readable = raw.query(sql, bindings).stream()

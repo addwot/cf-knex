@@ -247,23 +247,43 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // Whether that promise settling promptly actually keeps the pooled
     // connection held for exactly this long, though, depends on which of
     // knex's *two* independent release paths gets there first — this method
-    // only controls one of them. `Runner.ensureConnection`'s own `finally {
+    // only controls one of them, and which path is even reachable differs
+    // outside vs. inside `db.transaction()`.
+    //
+    // Outside a transaction: `Runner.ensureConnection`'s own `finally {
     // await this.client.releaseConnection(...) }` (node_modules/knex/lib/
     // execution/runner.js) does genuinely await this method's returned
-    // promise before releasing — but only on the ordinary, non-transactional
-    // acquire path; inside `db.transaction()` it returns without any release
-    // wrapping at all, since the transaction itself owns the connection's
-    // lifetime. Independently of that, `Runner.stream()` also registers
-    // `stream.on('close', () => this.client.releaseConnection(...))` on the
-    // output Transform *at creation time* — this fires the instant a
+    // promise before releasing. But `Runner.stream()` also independently
+    // registers `stream.on('close', () => this.client.releaseConnection(...))`
+    // on the output Transform *at creation time* — this fires the instant a
     // consumer stops early (a `break` inside `for await`, which destroys the
-    // Transform), with no dependency on this method's promise at all. A
-    // driver adapter whose own `stream()` cleanup can still be issuing
-    // queries after an early exit (src/adapters/pg.ts's cursor teardown,
-    // for instance) has to defend against that release path itself — see
-    // that file's `handlesMidTeardown` comment — because by the time this
-    // method's promise settles, the pool may already have tried to hand the
-    // same connection to someone else.
+    // Transform), with no dependency on this method's promise at all. Both
+    // of those calls reach the same real, base client, so either one can
+    // genuinely return the pooled connection to the pool while this method's
+    // own cleanup is still running.
+    //
+    // Inside `db.transaction()`, the picture is different, not just "the
+    // first path doesn't apply": query builders built from `trx(...)` run
+    // against `trxClient`, not the base client (`makeTransactor(trx,
+    // connection, trxClient)` → `makeKnex(trxClient)`), and `makeTxClient`
+    // (node_modules/knex/lib/execution/transaction.js) overrides
+    // `trxClient.releaseConnection` with a no-op (`() => Promise.resolve()`).
+    // So the *same* `stream.on('close', ...)` handler still fires on an early
+    // exit inside a transaction, but the call it makes resolves immediately
+    // without touching the pool, since `this.client` there is `trxClient`.
+    // That does not make a transaction's connection immune to a premature
+    // release, though: `Transaction.prototype.acquireConnection`'s own
+    // `finally` block calls the *real* base client's `releaseConnection`
+    // once the transaction callback's promise settles and commit/rollback
+    // has fully resolved — independently of whether some other, unawaited,
+    // overlapping `stream()` call on that same transaction is still
+    // mid-cleanup. A driver adapter whose own `stream()` cleanup can still be
+    // issuing queries after an early exit (src/adapters/pg.ts's cursor
+    // teardown, for instance) has to defend against both of these — the
+    // non-transactional Transform-'close' race and this narrower
+    // transactional one — the same way, because both ultimately call the
+    // real client's `releaseConnection`; see src/adapters/pg.ts's
+    // `handlesMidTeardown` comment for how it does that.
     _stream(handle: unknown, obj: Record<string, unknown>, stream: StreamSink): Promise<void> {
       if (!adapter.capabilities.streaming || !adapter.stream) {
         throw CfKnexError.unsupported(adapter.driver, 'streaming', adapter.hints?.streaming ?? 'Use .limit()/.offset() to paginate.')

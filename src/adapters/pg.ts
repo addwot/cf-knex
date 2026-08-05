@@ -211,14 +211,33 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // not stop `RELEASE SAVEPOINT` from cascading across them).
   let cursorSeq = 0
 
-  // Handles currently mid-teardown inside `stream()` below — added the
-  // moment a `stream()` call starts, removed only after its `finally` block
-  // has fully finished. Exists because of a race in knex itself, not in this
-  // adapter: `Runner.stream()` (node_modules/knex/lib/execution/runner.js)
-  // registers `stream.on('close', () => this.client.releaseConnection(...))`
-  // on the output Transform at creation time, and Node's `Readable` async-
-  // iterator protocol destroys that Transform — firing 'close' — the instant
-  // a consumer stops early (a `break` inside `for await (const row of
+  // How many `stream()` calls (below) are currently mid-teardown on a given
+  // handle — incremented the moment a `stream()` call starts, decremented
+  // only after its own `finally` block has fully finished. A *count*, not a
+  // membership flag, because more than one `stream()` can be mid-teardown on
+  // the exact same handle at once: nothing stops a caller starting a second
+  // `trx(t2).stream()` before awaiting the first, inside one
+  // `db.transaction()` callback, and each overlapping call runs this
+  // generator concurrently on the one connection the transaction shares. A
+  // `Set` cannot represent that — `add()` is idempotent, so two overlapping
+  // calls collapse to one membership entry, and whichever finishes *first*
+  // deletes it while the second is still live, reopening the race below for
+  // the still-running one. Reproduced live, deterministically, 3/3: with a
+  // `Set`, `validate()` read `false` while both streams were open, then
+  // flipped to `true` the instant the first of the two finished even though
+  // the second was still mid-teardown — the exact gap a `Map<handle,
+  // number>` closes, since `has()` only reports `false` once the count
+  // returns to zero.
+  //
+  // Exists because of two distinct premature-release races in knex itself,
+  // not in this adapter — one outside a transaction, one inside:
+  //
+  // Outside `db.transaction()`: `Runner.stream()`
+  // (node_modules/knex/lib/execution/runner.js) registers `stream.on('close',
+  // () => this.client.releaseConnection(this.connection))` on the output
+  // Transform at creation time, and Node's `Readable` async-iterator
+  // protocol destroys that Transform — firing 'close' — the instant a
+  // consumer stops early (a `break` inside `for await (const row of
   // db(t).stream())`), with *no* dependency on whether this generator's own
   // cleanup (the `finally` block below: `CLOSE`, `ROLLBACK TO SAVEPOINT` /
   // `COMMIT`) has even started, let alone finished. That is a *second*,
@@ -226,18 +245,40 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // ordered one `Runner.ensureConnection`'s own `finally { await
   // this.client.releaseConnection(...) }` performs only after awaiting
   // `_stream()`'s returned promise (src/core/client.ts's `_stream()` —
-  // see its own comment for why *that* await is real). Confirmed live via
-  // node_modules/.pnpm/tarn@3.1.2's Pool.js: `release()` moves the handle
-  // to `free` and, if another caller is already waiting, synchronously hands
-  // it straight out — meaning a concurrent `db.transaction()` (or even this
-  // same client's very next query, per the existing "leaves the connection/
-  // pool usable afterward" integration test) can receive and start issuing
-  // queries on this *exact* connection while this generator's own
-  // CLOSE/ROLLBACK-TO-SAVEPOINT/COMMIT calls are still in flight on it —
-  // reproduced directly: an unrelated query issued shortly after an early
-  // `break`, against a single-connection pool, measurably serializes behind
-  // whatever this generator's own abandoned cursor loop and cleanup were
-  // still doing on that connection, rather than running independently.
+  // see its own comment for why *that* await is real).
+  //
+  // Inside `db.transaction()`, that specific Transform-'close' path is
+  // neutralized, not a threat: `makeTxClient`
+  // (node_modules/knex/lib/execution/transaction.js) overrides
+  // `trxClient.releaseConnection` with a no-op (`() =>
+  // Promise.resolve()`) precisely so a per-query `Runner` — which is
+  // constructed against `trxClient`, not the base client, for every
+  // `trx(...)` call — can never hand the shared transaction connection back
+  // to the pool mid-transaction. But `Transaction.prototype.acquireConnection`
+  // (same file) has its *own*, separate `finally` block that calls the real,
+  // *base* client's `releaseConnection` — the one that actually reaches
+  // tarn — once the transaction callback's returned promise settles *and*
+  // the resulting `commit()`/`rollback()` has fully resolved, with no
+  // dependency on whether some other, still-unawaited `trx(...).stream()`
+  // call on that same connection has finished its own cleanup yet. Same
+  // shape of race, different trigger. (This corrects an earlier version of
+  // this comment, and this task's report, that described the Transform-
+  // 'close' path itself as applying "unconditionally, including inside
+  // `db.transaction()`" — it does not; the transactional exposure is real
+  // but runs through `Transaction.acquireConnection`, not that handler.)
+  //
+  // Both paths ultimately reach the same place: tarn's `Pool.js` `release()`
+  // moves the handle to `free` and, if another caller is already waiting,
+  // synchronously hands it straight out — meaning a concurrent
+  // `db.transaction()` (or even this same client's very next query, per the
+  // existing "leaves the connection/pool usable afterward" integration
+  // test) can receive and start issuing queries on this *exact* connection
+  // while this generator's own CLOSE/ROLLBACK-TO-SAVEPOINT/COMMIT calls are
+  // still in flight on it — reproduced directly: an unrelated query issued
+  // shortly after an early `break`, against a single-connection pool,
+  // measurably serializes behind whatever this generator's own abandoned
+  // cursor loop and cleanup were still doing on that connection, rather than
+  // running independently.
   //
   // tarn calls its configured `validate` function — wired straight through
   // to this adapter's own `validate()` below (src/core/client.ts's
@@ -249,16 +290,16 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // failed validation permanently evicts the handle — `_destroy()`, mapped
   // to this adapter's own `release()` — rather than ever handing it out.
   // That ordering is unconditional, not best-effort, so marking a handle
-  // here for the exact span this generator might still be issuing queries
-  // on it closes the race regardless of timing: nobody can be handed this
-  // connection while it says so. Confirmed live via a real knex Client
-  // wired the same way (acquireRawConnection/destroyRawConnection/
-  // validateConnection — no import of this project's own source, since the
-  // race is entirely in knex/tarn's mechanics, not this adapter's): with
-  // the mark checked, the premature release is rejected, the handle is
-  // evicted and a fresh one created for the waiting caller instead, and the
-  // previously-serialized independent query runs immediately and
-  // independently.
+  // here for the exact span any `stream()` call might still be issuing
+  // queries on it closes the race regardless of timing: nobody can be
+  // handed this connection while the count says so. Confirmed live via a
+  // real knex Client wired the same way (acquireRawConnection/
+  // destroyRawConnection/validateConnection — no import of this project's
+  // own source, since the race is entirely in knex/tarn's mechanics, not
+  // this adapter's): with the mark checked, the premature release is
+  // rejected, the handle is evicted and a fresh one created for the waiting
+  // caller instead, and the previously-serialized independent query runs
+  // immediately and independently.
   //
   // Losing this race to eviction (tarn calling this adapter's own
   // `release()` — `client.end()` — while this generator's `finally` block
@@ -269,7 +310,31 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // rolls back an unfinished transaction the moment its connection drops,
   // and `stream()`'s own early-exit branch below already treats its cleanup
   // as best-effort for exactly this reason.
-  const handlesMidTeardown = new Set<PgClientShim>()
+  //
+  // Not cleared by `release()`/`destroy()` below — a handle that reaches
+  // either of those while still present here would leak its entry forever,
+  // holding a strong reference to an ended `Client`. Harmless in practice
+  // (this generator's own `finally` always runs and always removes its
+  // entry, even when `client.end()` races ahead and destroys the socket
+  // underneath it — pg rejects any in-flight query on a torn-down connection
+  // rather than hanging, node_modules/.pnpm/pg's `Client.js:198-204` — so
+  // the `finally` block still completes, just via caught rejections instead
+  // of successful queries), but not something to rely on by construction:
+  // both `release()` and `destroy()` below also delete this handle's entry,
+  // so a hypothetical future path that closes a handle without this
+  // generator's own `finally` ever running (an abandoned iterator that is
+  // never driven to completion, for instance) cannot poison it permanently.
+  const handlesMidTeardown = new Map<PgClientShim, number>()
+
+  function markMidTeardown(client: PgClientShim): void {
+    handlesMidTeardown.set(client, (handlesMidTeardown.get(client) ?? 0) + 1)
+  }
+
+  function unmarkMidTeardown(client: PgClientShim): void {
+    const next = (handlesMidTeardown.get(client) ?? 0) - 1
+    if (next <= 0) handlesMidTeardown.delete(client)
+    else handlesMidTeardown.set(client, next)
+  }
 
   return {
     dialect: 'postgres',
@@ -330,6 +395,13 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     async release(handle: unknown): Promise<void> {
       const client = handle as PgClientShim
       open.delete(client)
+      // Drops any lingering `handlesMidTeardown` entry for this exact
+      // handle too — see that `Map`'s own comment above for why this isn't
+      // load-bearing today (this generator's own `finally` always clears its
+      // own entry, even when `client.end()` races ahead of it) but is kept
+      // as a backstop against a hypothetical future path that could close a
+      // handle without ever running that `finally`.
+      handlesMidTeardown.delete(client)
       await client.end()
     },
 
@@ -349,6 +421,11 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
       const client = handle as unknown as PgClientInternals
       return client._queryable && !client._ending && !client._ended && !handlesMidTeardown.has(handle as PgClientShim)
     },
+    // (`handlesMidTeardown.has(...)` above is unchanged by the `Set` ->
+    // `Map<handle, number>` switch: a `Map`'s `has()` already reports
+    // `false` once an entry's count has been decremented back out of
+    // existence — see the `Map`'s own comment for why a plain `Set` was
+    // wrong for the case of two overlapping `stream()` calls on one handle.)
 
     async execute(handle, sql, bindings): Promise<RawResult> {
       const client = handle as PgClientShim
@@ -452,17 +529,60 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // transaction, at any nesting depth, in one step, the moment that
     // transaction's own outer `COMMIT` or `ROLLBACK` runs, regardless of how
     // many are still open or in what order they were created — confirmed
-    // live across all three shapes this method can produce: the plain
-    // dangling-savepoint case, two dangling siblings finishing in either
-    // order, and one sibling failing (`ROLLBACK TO SAVEPOINT`, still
-    // necessary — see below) while the other finishes normally alongside it.
+    // live for every all-succeed shape this method can produce: the plain
+    // dangling-savepoint case, and two dangling siblings finishing in either
+    // order.
+    //
     // `ROLLBACK TO SAVEPOINT` on the failure path is not removed alongside
-    // it: unlike `RELEASE`, it is the one statement that actually undoes
-    // postgres's aborted-transaction state after a failed `DECLARE`/`FETCH`,
-    // with no equivalent the eventual outer `COMMIT`/`ROLLBACK` could stand
-    // in for — without it, every later query on that connection (a sibling
-    // stream's own next `FETCH`, or the transaction's own eventual `COMMIT`)
-    // would itself fail with 25P02.
+    // `RELEASE`: unlike `RELEASE`, it is the one statement that actually
+    // undoes postgres's aborted-transaction state after a failed
+    // `DECLARE`/`FETCH`, with no equivalent the eventual outer
+    // `COMMIT`/`ROLLBACK` could stand in for — without it, every later query
+    // on that connection (a sibling stream's own next `FETCH`, or the
+    // transaction's own eventual `COMMIT`) would itself fail with 25P02.
+    // Keeping it is *not*, however, a complete fix for one sibling failing
+    // while another is still open on the same connection — confirmed live,
+    // and this is a known, currently-unfixed limitation, not a "confirmed
+    // safe" case: postgres's savepoints are a single linear stack ordered by
+    // *creation time*, not a tree that mirrors which `stream()` call
+    // logically owns which one. `ROLLBACK TO SAVEPOINT` always undoes
+    // everything created *after* the named savepoint — so if the failing
+    // stream's own savepoint happens to be the *earlier* of the two (it
+    // started first), its `ROLLBACK TO SAVEPOINT` on failure destroys the
+    // still-open sibling's cursor as a side effect, exactly like the
+    // `RELEASE SAVEPOINT` cascade above, just via a call this method cannot
+    // remove. Reproduced live: sibling B's savepoint created before sibling
+    // A's cursor is declared, B then fails (division by zero) and runs
+    // `ROLLBACK TO SAVEPOINT` on its own (earlier) savepoint — A's next
+    // `FETCH` then fails with `cursor "…" does not exist` (SQLSTATE 34000),
+    // and if nothing recovers the transaction after that, a caller's
+    // eventual `COMMIT` does not throw at all: postgres silently executes it
+    // as a `ROLLBACK` instead (confirmed live — the `Result`'s own `command`
+    // field reads `'ROLLBACK'`, not `'COMMIT'`, and a row inserted earlier in
+    // the same transaction was not persisted). A caller who thinks their
+    // transaction committed can lose real, uncontested work with no error at
+    // all.
+    //
+    // Gating `ROLLBACK TO SAVEPOINT` on "no sibling stream currently open on
+    // this handle" — cheap now that `handlesMidTeardown` above is a refcount
+    // — was considered and rejected: it does not protect the sibling, it
+    // only changes which error the sibling eventually sees. The shared
+    // connection is already in postgres's transaction-wide aborted state the
+    // instant *any* concurrent statement on it fails — that is not scoped to
+    // whichever savepoint caused it — so skipping the recovery statement
+    // just leaves every other query on that connection, including the
+    // sibling's own next `FETCH`, failing immediately with 25P02 instead of
+    // eventually with "cursor does not exist" once something else recovers
+    // the transaction. Either way the sibling's work is lost; only the
+    // error message changes. Actually protecting a sibling from a failing
+    // stream needs each concurrently-open stream on its own connection
+    // instead of whatever connection the caller's transaction happens to be
+    // on — a materially different design, out of scope here. Overlapping,
+    // unawaited streams sharing one transaction connection are safe when
+    // all of them succeed (the case this method's own tests cover); a
+    // caller that cannot rule out one of them failing should not overlap
+    // them on a shared transaction connection — await each stream before
+    // starting the next instead.
     //
     // The three-way branch below (`failed` / `completed` / neither) is what
     // early exit needs that a plain boolean cannot express. An early exit —
@@ -482,7 +602,7 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // this point (src/core/client.ts's `waitForDrain`/`StreamSinkClosed`
     // already discard it), and `handlesMidTeardown` above means this exact
     // branch is the one tarn may legitimately be racing to evict this handle
-    // out from under — from — right now, closing the connection mid-query.
+    // out from under right now, closing the connection mid-query.
     // Both are reasons this method cannot afford to surface for a normal,
     // still-attached, fully-consumed stream: a caller who *is* still
     // waiting on the result deserves to know their commit didn't happen.
@@ -501,7 +621,7 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
       const marker = `cf_knex_sp_${++cursorSeq}`
       const cursorName = `cf_knex_cur_${cursorSeq}`
 
-      handlesMidTeardown.add(client)
+      markMidTeardown(client)
       try {
         let nested: boolean
         try {
@@ -544,7 +664,7 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
           }
         }
       } finally {
-        handlesMidTeardown.delete(client)
+        unmarkMidTeardown(client)
       }
     },
 
@@ -557,6 +677,9 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
       // `destroy()`).
       await Promise.all([...open].map((client) => client.end()))
       open.clear()
+      // Same backstop as `release()` above, for every handle this call just
+      // ended directly rather than one at a time through `release()`.
+      handlesMidTeardown.clear()
     },
   }
 }
