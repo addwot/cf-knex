@@ -1,21 +1,33 @@
+import { test } from 'vitest'
 import { createMysql2Adapter } from '../../src/adapters/mysql2'
 import { createKnexClient } from '../../src/core/client'
 import { runConformanceSuite } from '../support/conformance'
 
 const caps = { streaming: true, transactions: true }
 
+// Every conformance block here is conditional on a connection URL, so with no
+// database configured this file would register zero tests — and vitest fails a
+// file that contains no suite ("No test suite found in file"). A missing URL
+// must read as "not run here", never as a failure, so each skip registers a
+// named placeholder alongside its warning: the reporter then shows exactly
+// which suites were skipped and why, and the file still counts as a suite.
+function skip(name: string, envVar: string) {
+  console.warn(`SKIP ${name} — ${envVar} not set`)
+  test.skip(`${name} (${envVar} not set)`, () => {})
+}
+
 if (process.env.MYSQL_URL) {
   const url = process.env.MYSQL_URL
   runConformanceSuite('mysql2 (direct, MySQL 8)', () => createKnexClient(createMysql2Adapter({ url })), caps)
 } else {
-  console.warn('SKIP mysql2 direct — MYSQL_URL not set')
+  skip('mysql2 (direct, MySQL 8)', 'MYSQL_URL')
 }
 
 if (process.env.MARIADB_URL) {
   const url = process.env.MARIADB_URL
   runConformanceSuite('mysql2 (direct, MariaDB 11)', () => createKnexClient(createMysql2Adapter({ url })), caps)
 } else {
-  console.warn('SKIP mysql2 mariadb — MARIADB_URL not set')
+  skip('mysql2 (direct, MariaDB 11)', 'MARIADB_URL')
 }
 
 // A real `Hyperdrive` binding exists only inside workerd, and `mysql2` loads
@@ -47,5 +59,5 @@ if (process.env.MYSQL_URL) {
     caps,
   )
 } else {
-  console.warn('SKIP mysql2 hyperdrive-shaped — MYSQL_URL not set')
+  skip('mysql2 (via Hyperdrive-shaped config)', 'MYSQL_URL')
 }
