@@ -84,6 +84,31 @@ test('_stream() throws CfKnexError with code UNSUPPORTED_CAPABILITY', () => {
   }
 })
 
+test('db.transaction() rejects with a documented CfKnexError when the adapter declares no transaction support', async () => {
+  // Regression coverage for a real gap: knex's own `Client.transaction()`
+  // (node_modules/knex/lib/client.js) has no notion of `adapter.capabilities`
+  // and will happily hand back a `Transaction` that issues BEGIN/COMMIT/
+  // ROLLBACK as ordinary queries through `_query()` -- for an adapter that
+  // cannot guarantee those three land on the same underlying session
+  // (declared via `capabilities.transactions: false`), that would silently
+  // no-op every rollback instead of failing loudly. `CfKnexClient.transaction`
+  // in src/core/client.ts must gate on the flag before ever reaching knex's
+  // `Transaction`, mirroring the existing `_stream()` throw just above.
+  const { adapter } = createFakeAdapter({ dialect: 'mysql', capabilities: { transactions: false } })
+  const db = createKnexClient(adapter)
+
+  await expect(db.transaction(async () => {})).rejects.toThrow(/not supported/i)
+  try {
+    await db.transaction(async () => {})
+    throw new Error('expected db.transaction() to throw')
+  } catch (err) {
+    expect(err).toBeInstanceOf(CfKnexError)
+    expect((err as CfKnexError).code).toBe('UNSUPPORTED_CAPABILITY')
+  }
+
+  await db.destroy()
+})
+
 test('sequential queries reuse a pooled connection instead of acquiring one per query (regression)', async () => {
   // Regression coverage for the original bug: `createKnexClient` used to
   // override knex's higher-level `acquireConnection`/`releaseConnection`

@@ -52,6 +52,7 @@ const DEFAULT_LOG = {
 // `unknown`, same as before).
 type KnexClientInstance = Record<string, unknown> & {
   destroy(callback?: (err?: unknown) => void): Promise<void>
+  transaction(container: unknown, config?: unknown, outerTx?: unknown): unknown
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- mirrors knex's own public `Knex<TRecord, TResult>` signature (node_modules/knex/types/index.d.ts); widening it would diverge from knex's generics and break `.select()`/`.selec()` type-checking.
@@ -120,6 +121,34 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
 
     _stream() {
       throw CfKnexError.unsupported(adapter.driver, 'streaming', 'Use .limit()/.offset() to paginate.')
+    }
+
+    // knex's own `Client.transaction()` (node_modules/knex/lib/client.js)
+    // has no notion of `adapter.capabilities` and will happily hand back a
+    // `Transaction` that issues BEGIN/COMMIT/ROLLBACK as ordinary queries
+    // through `_query()` above — for an adapter that cannot guarantee those
+    // three statements land on the same underlying session (declared via
+    // `capabilities.transactions: false`), that is the worst possible
+    // failure: writes appear to succeed and a rollback silently commits
+    // instead. Gate it here, the same way `_stream()` above gates streaming.
+    //
+    // This must return a *rejected Promise*, not throw synchronously: knex's
+    // `make-knex.js` `_transaction()` returns whatever this method produces
+    // directly and unwrapped whenever a callback container is passed (the
+    // common `db.transaction(async trx => {...})` shape) — a synchronous
+    // throw here would escape as a thrown exception instead of the rejected
+    // promise callers `await`/`.catch()`/`expect(...).rejects` expect.
+    transaction(container: unknown, config?: unknown, outerTx?: unknown): unknown {
+      if (!adapter.capabilities.transactions) {
+        return Promise.reject(
+          CfKnexError.unsupported(
+            adapter.driver,
+            'transactions',
+            'Each query executes as an independent request against this driver, so BEGIN/COMMIT/ROLLBACK cannot be guaranteed to share a session.',
+          ),
+        )
+      }
+      return super.transaction(container, config, outerTx)
     }
 
     // knex's own `Client.destroy()` only tears down the pool — which, now

@@ -1,4 +1,4 @@
-import type { Dialect, DriverAdapter, RawResult } from '../../src/core/types'
+import type { AdapterCapabilities, Dialect, DriverAdapter, RawResult } from '../../src/core/types'
 
 export function createFakeAdapter(opts: {
   dialect: Dialect
@@ -15,6 +15,12 @@ export function createFakeAdapter(opts: {
   // even as a no-op true, would stop that default path from being the one
   // every other test in this suite exercises.
   invalidateAfterFirstUse?: boolean
+  // Merged over the default `{ streaming: false, transactions: true }`
+  // rather than replacing it outright, so a test that only cares about one
+  // flag (e.g. asserting `createKnexClient` rejects `db.transaction()` when
+  // an adapter declares `capabilities.transactions: false`) doesn't have to
+  // restate the other.
+  capabilities?: Partial<AdapterCapabilities>
 }) {
   const calls: Array<{ sql: string; bindings: unknown[] }> = []
   // `createKnexClient` (src/core/client.ts) wires `acquire`/`release`/
@@ -32,7 +38,7 @@ export function createFakeAdapter(opts: {
   const adapter: DriverAdapter = {
     dialect: opts.dialect,
     driver: 'mysql2',
-    capabilities: { streaming: false, transactions: true },
+    capabilities: { streaming: false, transactions: true, ...opts.capabilities },
     acquire: async () => {
       acquireCount++
       const handle = {}
