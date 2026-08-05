@@ -23,8 +23,31 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
     })
 
     test('insert returns an id', async () => {
-      const [id] = await db(table).insert({ name: 'alice', score: 1 })
-      expect(Number(id)).toBeGreaterThan(0)
+      if (db.client.dialect === 'postgresql') {
+        // knex's postgres `processResponse` (node_modules/knex/lib/dialects/
+        // postgres/index.js, the method right after `_query`) branches on
+        // `resp.command === 'SELECT'` first, then a truthy `returning`, then
+        // `UPDATE`/`DELETE` -> `resp.rowCount`, and only then falls through
+        // to `return resp` — the *whole* result object — for anything else,
+        // including a plain INSERT with no `.returning()`. Postgres has no
+        // `insertId`; knex's documented postgres behavior is that you ask
+        // for the id with `.returning('id')`, which routes through the
+        // `returning` branch instead and gets back an array of row objects.
+        // mysql and sqlite need no such thing (and mysql's dialect *warns*
+        // if you add `.returning()` to it — do not add one to the `else`
+        // branch below to "unify" the two cases).
+        //
+        // Confirmed empirically against a live postgres before this branch
+        // was written: `const [id] = await db(table).insert({...})` throws
+        // `TypeError: ... is not iterable` here — `resp` (a pg `Result`) is
+        // a plain object, not an array, so destructuring it as one throws
+        // rather than silently returning `undefined`.
+        const [row] = await db(table).insert({ name: 'alice', score: 1 }).returning('id')
+        expect(Number((row as { id: number }).id)).toBeGreaterThan(0)
+      } else {
+        const [id] = await db(table).insert({ name: 'alice', score: 1 })
+        expect(Number(id)).toBeGreaterThan(0)
+      }
     })
 
     test('select returns an array of rows', async () => {
