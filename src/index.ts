@@ -5,7 +5,7 @@ import { createPgAdapter } from './adapters/pg'
 import { createTidbHttpAdapter } from './adapters/tidb-http'
 import { createKnexClient } from './core/client'
 import { CfKnexError } from './core/errors'
-import { inferDriver } from './core/infer'
+import { inferDriver, isD1Binding } from './core/infer'
 import type { ClientConfig, DriverAdapter, DriverName } from './core/types'
 import type { Knex } from 'knex'
 
@@ -13,17 +13,38 @@ export { CfKnexError } from './core/errors'
 export type { CfKnexErrorCode } from './core/errors'
 export type { ClientConfig, Credentials, DriverAdapter, DriverName, Engine, RawResult } from './core/types'
 
-// `inferDriver` has already validated `config` by the time this runs — every
-// branch below can assume its required field (`url`/`binding`) is present,
-// even though `ClientConfig` types them optional.
+// `inferDriver` only confirms that `config` names exactly one connection
+// shape and that the resulting driver belongs to `config.engine` — it does
+// NOT confirm that shape is the one the chosen driver actually needs. An
+// explicit `config.driver` skips shape-based inference entirely (see
+// `infer()` in ./core/infer.ts), so e.g. `{ engine: 'sqlite', driver:
+// 'libsql', binding }` passes `inferDriver` — 'binding' is a valid shape,
+// 'libsql' is valid for 'sqlite' — yet supplies libsql with no `url` at all.
+// Reproduced concretely: that exact config previously reached
+// `createLibsqlAdapter({ url: undefined })` and only failed later, on the
+// first query, with `LibsqlError URL_INVALID: The URL 'undefined' is not in
+// a valid format` — a driver-internal error about the string "undefined",
+// not something naming the actual problem. `pg`/`mysql2`'s own factories
+// already guard this themselves (`resolveConfig`/its mysql2 equivalent both
+// throw `NO_CONNECTION` when none of `url`/`connection`/`hyperdrive` is
+// set), so only the three drivers without that self-check need a guard here.
 function buildAdapter(config: ClientConfig, driver: DriverName): DriverAdapter {
   switch (driver) {
     case 'd1':
+      if (config.binding === undefined) {
+        throw new CfKnexError('NO_CONNECTION', "driver 'd1' requires 'binding', which this config does not have")
+      }
       return createD1Adapter({ binding: config.binding as never })
     case 'libsql':
-      return createLibsqlAdapter({ url: config.url as string, authToken: config.authToken })
+      if (config.url === undefined) {
+        throw new CfKnexError('NO_CONNECTION', "driver 'libsql' requires 'url', which this config does not have")
+      }
+      return createLibsqlAdapter({ url: config.url, authToken: config.authToken })
     case 'tidb-http':
-      return createTidbHttpAdapter({ url: config.url as string })
+      if (config.url === undefined) {
+        throw new CfKnexError('NO_CONNECTION', "driver 'tidb-http' requires 'url', which this config does not have")
+      }
+      return createTidbHttpAdapter({ url: config.url })
     case 'pg':
       return createPgAdapter({ url: config.url, connection: config.connection, hyperdrive: config.hyperdrive })
     case 'mysql2':
@@ -43,21 +64,31 @@ export function createClient<TRecord extends {} = any, TResult = unknown[]>(
   return createKnexClient<TRecord, TResult>(buildAdapter(config, driver), config.knex)
 }
 
+// `connectionString` must actually be a string, not merely present: an env
+// value shaped like `{ connectionString: 123 }` (or `{ connectionString:
+// undefined }`, which still satisfies `'connectionString' in value`) used to
+// reach a bare `.startsWith()` call below and throw a raw `TypeError`
+// instead of either matching or cleanly not matching. Malformed-but-present
+// now simply does not match, the same as any other unrelated env value —
+// consistent with `isD1Binding` (imported from ./core/infer, not
+// reimplemented here) checking that `prepare` is actually a function, not
+// just that the key exists.
+function isHyperdriveBinding(value: unknown): value is { connectionString: string } {
+  return typeof value === 'object' && value !== null && typeof (value as { connectionString?: unknown }).connectionString === 'string'
+}
+
 /**
  * Scans `env`'s own values for exactly one D1 or Hyperdrive-shaped binding
  * and builds a client from it — the zero-config path for a Worker with a
- * single database binding. Duck-typed the same way `inferDriver`'s
- * `isD1Binding` is (a `prepare` method for D1; a `connectionString` field for
- * Hyperdrive), since `env`'s bindings arrive with no declared type here.
+ * single database binding.
  */
 export function fromEnv(env: Record<string, unknown>, opts: { prefer?: DriverName } = {}): Knex {
   const found: ClientConfig[] = []
   for (const value of Object.values(env)) {
-    if (value && typeof value === 'object' && typeof (value as { prepare?: unknown }).prepare === 'function') {
+    if (isD1Binding(value)) {
       found.push({ engine: 'sqlite', binding: value })
-    } else if (value && typeof value === 'object' && 'connectionString' in value) {
-      const hd = value as { connectionString: string }
-      found.push({ engine: hd.connectionString.startsWith('mysql') ? 'mysql' : 'postgres', hyperdrive: value as never })
+    } else if (isHyperdriveBinding(value)) {
+      found.push({ engine: value.connectionString.startsWith('mysql') ? 'mysql' : 'postgres', hyperdrive: value as never })
     }
   }
   if (found.length === 0) throw new CfKnexError('NO_CONNECTION', 'fromEnv found no D1 or Hyperdrive binding')

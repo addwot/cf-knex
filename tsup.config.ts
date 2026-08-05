@@ -1,10 +1,17 @@
 import { defineConfig } from 'tsup'
 
-// Every peer dependency stays external — a dynamic `await import('pg')`
-// (as every adapter uses) does not keep esbuild from inlining it on its own:
-// measured on this exact code, dropping this list ballooned dist/pg.js from
-// 594 bytes to 1.5 MB. `'knex'` alone is enough to cover every
-// `knex/lib/dialects/*` deep import too (all four resolve to the same
+// tsup already externalizes everything listed in package.json's
+// `peerDependencies` (node_modules/tsup/dist/chunk-VGC3FXLU.js reads
+// `data.peerDependencies` directly), so on the current package.json this
+// list is redundant with that default — verified by rebuilding with
+// `external: []`: every entry's output, and every shared chunk, comes out
+// byte-for-byte equivalent, and no driver-package internals (e.g. pg's own
+// error classes) appear inlined anywhere. Kept explicit anyway, not for
+// today's build but as a guard against tomorrow's: this list stays correct
+// even if a driver dependency is ever demoted out of `peerDependencies`
+// (a `dependencies`-only entry esbuild would otherwise be free to inline)
+// without this file being touched in the same change. `'knex'` alone also
+// covers every `knex/lib/dialects/*` deep import (all resolve to the same
 // package name), so no separate wildcard entry is needed for those.
 const EXTERNAL = ['knex', 'mysql2', 'mysql2/promise', 'pg', '@tidbcloud/serverless', '@libsql/client']
 
@@ -24,4 +31,17 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   external: EXTERNAL,
+  // Sourcemaps stay on — a consumer's stack trace should still be able to
+  // point at the right src/ line — but `sourcesContent` (esbuild's default)
+  // embeds the full text of every src/ file being mapped inside each .map,
+  // not just the mapping table. Measured on this exact build:
+  // `npm pack --dry-run --json` reports 1,034,446 unpacked bytes total, of
+  // which 729,050 (70.5%) is `.map` files, and every `.map` in dist/ has a
+  // non-empty `sourcesContent` array (checked directly, not assumed). None
+  // of that source text is needed to resolve a stack trace back to a
+  // src/ line/column — only the mappings are — so turning it off cuts the
+  // package's dominant cost with no loss to what sourcemaps are for here.
+  esbuildOptions(options) {
+    options.sourcesContent = false
+  },
 })

@@ -3,17 +3,17 @@
 // declarations of their own. Each default export is treated as an unknown
 // constructor — exactly what `createKnexClient`'s runtime
 // `typeof Base !== 'function'` guard checks before subclassing it.
-declare module 'knex/lib/dialects/mysql2' {
+declare module 'knex/lib/dialects/mysql2/index.js' {
   const Client_MySQL2: new (...args: never[]) => unknown
   export default Client_MySQL2
 }
 
-declare module 'knex/lib/dialects/postgres' {
+declare module 'knex/lib/dialects/postgres/index.js' {
   const Client_PG: new (...args: never[]) => unknown
   export default Client_PG
 }
 
-declare module 'knex/lib/dialects/sqlite3' {
+declare module 'knex/lib/dialects/sqlite3/index.js' {
   const Client_SQLite3: new (...args: never[]) => unknown
   export default Client_SQLite3
 }

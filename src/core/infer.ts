@@ -90,7 +90,7 @@ function infer(config: ClientConfig): DriverName {
   throw new CfKnexError('UNKNOWN_DRIVER', `cannot infer a driver from url '${redact(url)}' — set driver explicitly`)
 }
 
-function isD1Binding(binding: unknown): binding is { prepare: (...args: never[]) => unknown } {
+export function isD1Binding(binding: unknown): binding is { prepare: (...args: never[]) => unknown } {
   return typeof binding === 'object' && binding !== null && typeof (binding as { prepare?: unknown }).prepare === 'function'
 }
 

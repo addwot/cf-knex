@@ -1,10 +1,14 @@
 import Knex from 'knex'
 import type { Knex as KnexType } from 'knex'
 // knex ships types only for its public entry point; these deep CJS dialect
-// paths have no shipped declarations — see ./knex-dialects.d.ts.
-import Client_MySQL2 from 'knex/lib/dialects/mysql2'
-import Client_PG from 'knex/lib/dialects/postgres'
-import Client_SQLite3 from 'knex/lib/dialects/sqlite3'
+// paths have no shipped declarations — see ./knex-dialects.d.ts. The
+// trailing `/index.js` is required, not cosmetic: knex has no `exports` map,
+// so plain Node ESM (no bundler) refuses to resolve a bare directory import
+// here (`ERR_UNSUPPORTED_DIR_IMPORT`) even though `require()` and every
+// bundler resolve it fine without it.
+import Client_MySQL2 from 'knex/lib/dialects/mysql2/index.js'
+import Client_PG from 'knex/lib/dialects/postgres/index.js'
+import Client_SQLite3 from 'knex/lib/dialects/sqlite3/index.js'
 import { CfKnexError } from './errors'
 import { toKnexResponse } from './response'
 import type { Dialect, DriverAdapter } from './types'

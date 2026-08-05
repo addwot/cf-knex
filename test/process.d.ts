@@ -5,4 +5,4 @@
 // in the full Node global surface would be misleading — so `process` is
 // otherwise unresolvable to the type checker. Declare only the shape this
 // project's node-project tests actually read.
-declare const process: { env: Record<string, string | undefined> }
+declare const process: { env: Record<string, string | undefined>; execPath: string }

@@ -9,5 +9,16 @@
     "path": "dist/index.js",
     "limit": "15 kB",
     "ignore": ["knex", "mysql2", "pg", "@tidbcloud/serverless", "@libsql/client"]
+  },
+  { "name": "cf-knex/d1 (cjs)", "path": "dist/d1.cjs", "limit": "6 kB", "ignore": ["knex"] },
+  { "name": "cf-knex/tidb (cjs)", "path": "dist/tidb.cjs", "limit": "6 kB", "ignore": ["knex", "@tidbcloud/serverless"] },
+  { "name": "cf-knex/turso (cjs)", "path": "dist/turso.cjs", "limit": "6 kB", "ignore": ["knex", "@libsql/client"] },
+  { "name": "cf-knex/mysql (cjs)", "path": "dist/mysql.cjs", "limit": "6 kB", "ignore": ["knex", "mysql2"] },
+  { "name": "cf-knex/postgres (cjs)", "path": "dist/postgres.cjs", "limit": "6 kB", "ignore": ["knex", "pg"] },
+  {
+    "name": "cf-knex (root, cjs)",
+    "path": "dist/index.cjs",
+    "limit": "15 kB",
+    "ignore": ["knex", "mysql2", "pg", "@tidbcloud/serverless", "@libsql/client"]
   }
 ]
