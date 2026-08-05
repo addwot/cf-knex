@@ -55,6 +55,24 @@ type StreamSink = {
 class StreamSinkClosed extends Error {}
 
 /**
+ * `true` for the exact error Node's own `Readable` async-iterator protocol
+ * raises on the stream it is `for await`-ing when a consumer stops early — a
+ * `break` inside `for await (const row of db(t).stream())` calls `.return()`
+ * on the readable side, which destroys it, which — confirmed empirically,
+ * consistently, independent of whether a read was pending at the moment of
+ * the `break` — emits this *before* 'close', not instead of it: `name:
+ * 'AbortError'`, `code: 'ABORT_ERR'`. This is Node's own signal for "the
+ * reader walked away," structurally identical in intent to `StreamSinkClosed`
+ * below (both exist to tell "the consumer lost interest" apart from "the
+ * write actually failed") — `waitForDrain`'s `onError` treats it exactly the
+ * same way, rather than rejecting with it as if it were a genuine failure a
+ * caller needs to hear about.
+ */
+function isSinkAbortedByReader(err: unknown): boolean {
+  return err instanceof Error && (err as { code?: unknown }).code === 'ABORT_ERR' && err.name === 'AbortError'
+}
+
+/**
  * Resolves once `stream` emits 'drain', or rejects/resolves once it becomes
  * clear no 'drain' is coming — see `StreamSinkClosed` above for why both
  * outcomes exist. `stream.destroyed` is checked up front for the same reason:
@@ -76,7 +94,14 @@ function waitForDrain(stream: StreamSink): Promise<void> {
     const onError = (err: unknown) => {
       stream.off('drain', onDrain)
       stream.off('close', onClose)
-      reject(err)
+      // See `isSinkAbortedByReader` above: this specific error is the
+      // consumer walking away, arriving here as 'error' (always, and always
+      // *before* 'close' — confirmed empirically, not just in the odd case),
+      // not a genuine write failure. Rejecting with the real error here
+      // would otherwise be indistinguishable, downstream, from an actual
+      // failure — `_stream()`'s catch block only knows to swallow a
+      // `StreamSinkClosed`.
+      reject(isSinkAbortedByReader(err) ? new StreamSinkClosed() : err)
     }
     const onClose = () => {
       stream.off('drain', onDrain)
@@ -210,15 +235,35 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     //
     // Must return a Promise that genuinely settles on the outcome of the
     // stream, not merely a Promise that always resolves once some async work
-    // runs: knex's `Runner.ensureConnection` (node_modules/knex/lib/
-    // execution/runner.js) awaits exactly what this returns before releasing
-    // the connection back to the pool, and knex's own postgres `_stream`
-    // (node_modules/knex/lib/dialects/postgres/index.js) — the contract this
-    // matches — resolves on completion, rejects on error, and emits on the
-    // stream in the error case as well, all three. A version that only ever
-    // resolves (or only ever emits on the stream without also rejecting)
-    // would let a caller who `await`s `db(t).stream()`'s returned promise
-    // see success on a stream that actually failed partway through.
+    // runs: knex's own postgres `_stream` (node_modules/knex/lib/dialects/
+    // postgres/index.js) — the contract this matches — resolves on
+    // completion, rejects on error, and emits on the stream in the error
+    // case as well, all three. A version that only ever resolves (or only
+    // ever emits on the stream without also rejecting) would let a caller
+    // who `await`s `db(t).stream()`'s returned promise (or a `.stream()`
+    // callback's own return value) see success on a stream that actually
+    // failed partway through.
+    //
+    // Whether that promise settling promptly actually keeps the pooled
+    // connection held for exactly this long, though, depends on which of
+    // knex's *two* independent release paths gets there first — this method
+    // only controls one of them. `Runner.ensureConnection`'s own `finally {
+    // await this.client.releaseConnection(...) }` (node_modules/knex/lib/
+    // execution/runner.js) does genuinely await this method's returned
+    // promise before releasing — but only on the ordinary, non-transactional
+    // acquire path; inside `db.transaction()` it returns without any release
+    // wrapping at all, since the transaction itself owns the connection's
+    // lifetime. Independently of that, `Runner.stream()` also registers
+    // `stream.on('close', () => this.client.releaseConnection(...))` on the
+    // output Transform *at creation time* — this fires the instant a
+    // consumer stops early (a `break` inside `for await`, which destroys the
+    // Transform), with no dependency on this method's promise at all. A
+    // driver adapter whose own `stream()` cleanup can still be issuing
+    // queries after an early exit (src/adapters/pg.ts's cursor teardown,
+    // for instance) has to defend against that release path itself — see
+    // that file's `handlesMidTeardown` comment — because by the time this
+    // method's promise settles, the pool may already have tried to hand the
+    // same connection to someone else.
     _stream(handle: unknown, obj: Record<string, unknown>, stream: StreamSink): Promise<void> {
       if (!adapter.capabilities.streaming || !adapter.stream) {
         throw CfKnexError.unsupported(adapter.driver, 'streaming', adapter.hints?.streaming ?? 'Use .limit()/.offset() to paginate.')

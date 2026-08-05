@@ -23,6 +23,16 @@ function createFakeSink(opts: { writeReturns?: boolean[] } = {}) {
   let destroyed = false
   const writeReturns = opts.writeReturns ?? []
   let writeCalls = 0
+  // Calls to the sink's own `emit()` method specifically — the one
+  // `_stream()`'s catch block calls (`stream.emit('error', err)`), as
+  // opposed to `fire()` below, which is how this fake's own internal
+  // helpers (`destroyNow()`) simulate a *real* Transform's independent,
+  // Node-generated 'error'/'close' events. Keeping these two paths
+  // distinguishable is what lets a test tell "the sink itself naturally
+  // emitted an abort on destroy" (expected, not a bug) apart from "`_stream()`'s
+  // own code additionally, redundantly re-emitted on top of it" (the actual
+  // regression Finding 3 is about — see the test below).
+  let emitCalls = 0
   const listeners: Record<'drain' | 'close' | 'error', Set<(err?: unknown) => void>> = {
     drain: new Set(),
     close: new Set(),
@@ -51,6 +61,7 @@ function createFakeSink(opts: { writeReturns?: boolean[] } = {}) {
       ended = true
     },
     emit(_event: 'error', err: unknown): boolean {
+      emitCalls++
       fire('error', err)
       return true
     },
@@ -65,14 +76,23 @@ function createFakeSink(opts: { writeReturns?: boolean[] } = {}) {
     sink,
     written,
     isEnded: () => ended,
+    emitCallCount: () => emitCalls,
     fireDrain: () => fire('drain'),
     // Simulates the consumer walking away mid-stream (e.g. an early `break`
-    // out of a `for await` over the real stream `sink` stands in for): the
-    // sink is destroyed with no error, which is exactly the case
-    // `StreamSinkClosed` (src/core/client.ts) exists to turn into a quiet
-    // resolve rather than a hang or a false rejection.
+    // out of a `for await` over the real stream `sink` stands in for) —
+    // matching real `Transform` behavior, confirmed empirically and
+    // consistently against Node's actual `Readable` async-iterator
+    // machinery, not just the easy no-error case: destroying it this way
+    // fires 'error' (an `AbortError`, `code: 'ABORT_ERR'`) *before* 'close',
+    // not close alone. Both are exactly the case `StreamSinkClosed`
+    // (src/core/client.ts) exists to turn into a quiet resolve rather than a
+    // hang or a false rejection — see that file's `isSinkAbortedByReader`.
     destroyNow: () => {
       destroyed = true
+      const abortErr = new Error('The operation was aborted')
+      abortErr.name = 'AbortError'
+      ;(abortErr as unknown as { code: string }).code = 'ABORT_ERR'
+      fire('error', abortErr)
       fire('close')
     },
   }
@@ -317,14 +337,22 @@ test('_stream() rejects and emits on the sink when the adapter stream throws mid
   expect(written).toEqual([{ id: 1 }])
 })
 
-test('_stream() resolves quietly (no throw, no emit) when the sink closes while awaiting drain (early-exit teardown, A5)', async () => {
+test('_stream() resolves quietly (no throw, no re-emit) when the sink closes while awaiting drain (early-exit teardown, A5/Finding 3)', async () => {
   // Regression coverage for the deadlock/false-rejection this specifically
   // guards against: a consumer stopping early (e.g. `break` inside a
-  // `for await` over the real stream) destroys it without an error. A
-  // naive drain-wait that only listens for 'drain' would hang forever; one
-  // that treats any non-drain settlement as a real failure would reject
-  // `_stream()`'s promise (and `emit('error', …)` again) over a consumer
-  // simply losing interest, which is not a failure.
+  // `for await` over the real stream) destroys it — and, confirmed live
+  // against a real `Transform`, does so by emitting 'error' (an
+  // `AbortError`, `code: 'ABORT_ERR'`) *before* 'close', not close alone
+  // (`createFakeSink`'s `destroyNow()` reproduces that exact sequence, not
+  // a simplified close-only one — see its comment). A naive drain-wait that
+  // only listens for 'drain' would hang forever; one that treats *every*
+  // 'error' as a real failure (the actual Finding 3 regression: this test
+  // used to pass against a fake sink that never fired 'error' on destroy at
+  // all, so it never exercised this) would reject `_stream()`'s promise and
+  // `emit('error', …)` a *second* time over a consumer simply losing
+  // interest, which is not a failure — `emitCallCount()` below checks for
+  // exactly that second, redundant emission from `_stream()`'s own code,
+  // separately from the sink's own natural one `destroyNow()` fires.
   const { adapter } = createFakeAdapter({
     dialect: 'mysql',
     capabilities: { streaming: true },
@@ -338,11 +366,7 @@ test('_stream() resolves quietly (no throw, no emit) when the sink closes while 
   const client = db.client as unknown as {
     _stream: (handle: unknown, obj: Record<string, unknown>, sink: unknown) => Promise<void>
   }
-  const { sink, written, destroyNow } = createFakeSink({ writeReturns: [false] })
-  let emitted = false
-  sink.once('error', () => {
-    emitted = true
-  })
+  const { sink, written, destroyNow, emitCallCount } = createFakeSink({ writeReturns: [false] })
 
   const done = client._stream({}, { sql: 'select * from t', bindings: [] }, sink)
   await new Promise((resolve) => setTimeout(resolve, 0))
@@ -351,7 +375,7 @@ test('_stream() resolves quietly (no throw, no emit) when the sink closes while 
   destroyNow()
 
   await expect(done).resolves.toBeUndefined()
-  expect(emitted).toBe(false)
+  expect(emitCallCount()).toBe(0)
   expect(written).toEqual([{ id: 1 }])
 })
 
