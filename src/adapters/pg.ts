@@ -428,21 +428,20 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // wrong for the case of two overlapping `stream()` calls on one handle.)
 
     // A `COMMIT` against a connection whose transaction postgres has already
-    // aborted for some other reason does not error — the database silently
-    // executes it as a `ROLLBACK` instead, so a caller who only checked "did
-    // my `db.transaction()` call reject" has no way to know their work was
-    // dropped (see `stream()`'s sibling-failure comment below for the
-    // shape most likely to cause this). knex routes every caller-triggered
-    // `COMMIT` through this method; `stream()`'s own internal best-effort
-    // `COMMIT` does not, so this check has nothing to do there. This turns
-    // that silent loss into a typed error — it does not recover the work.
+    // aborted (e.g. an earlier statement's error was caught and swallowed
+    // inside a `db.transaction()` callback instead of left to propagate)
+    // does not error — the database silently executes it as a `ROLLBACK`
+    // instead. knex routes every caller-triggered `COMMIT` through this
+    // method; `stream()`'s own internal best-effort `COMMIT` does not, so
+    // this check has nothing to do there. Turns that silent loss into a
+    // typed error; it does not recover the work.
     async execute(handle, sql, bindings): Promise<RawResult> {
       const client = handle as PgClientShim
       const res = await client.query(sql, bindings)
       const result = toRawResult(res)
       if (isCommitStatement(sql) && result.command === 'ROLLBACK') {
         throw CfKnexError.commitSilentlyRolledBack(
-          "the transaction's own work may be partially or entirely lost — check what aborted it (a failed statement earlier on this connection, most likely from an overlapping stream() sibling; see src/adapters/pg.ts's stream() comment).",
+          "the transaction's own work may be partially or entirely lost — an earlier statement on this connection failed and its error was caught instead of propagating, leaving the transaction aborted; find and fix that statement.",
         )
       }
       return result
@@ -754,10 +753,13 @@ function toRawResult(res: unknown): RawResult {
   }
 }
 
-// Matches only a bare `COMMIT` statement — exactly what knex's own
-// `Transaction.prototype.commit` sends, and deliberately not a `/^commit\b/i`
-// prefix test: anything else starting with "commit" is out of scope here.
-const COMMIT_STATEMENT = /^COMMIT\s*;?\s*$/i
+// `COMMIT`/`END` (postgres synonyms) with an optional `AND CHAIN`, and
+// nothing else — anchored, not a prefix test, so a user query or table
+// merely containing "commit" can't match. knex itself only ever sends
+// plain `COMMIT;`; `END`/`AND CHAIN` are only reachable via a caller's own
+// `raw()`, but return the identical silent-`ROLLBACK` shape when aborted,
+// confirmed live, so they're covered too.
+const COMMIT_STATEMENT = /^(?:COMMIT|END)(?:\s+AND\s+CHAIN)?\s*;?\s*$/i
 
 function isCommitStatement(sql: string): boolean {
   return COMMIT_STATEMENT.test(sql)

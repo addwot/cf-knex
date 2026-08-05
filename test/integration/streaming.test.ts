@@ -581,28 +581,28 @@ if (process.env.POSTGRES_URL) {
       expect(Number((count as { count: number }).count)).toBe(600)
     })
 
-    // End to end through real db.transaction(), covering the failure-path
-    // sibling scenario the previous test deliberately excludes: sibling B's
-    // savepoint is created before sibling A's cursor, B then fails, and its
-    // `ROLLBACK TO SAVEPOINT` cascades onto A exactly as documented in
-    // src/adapters/pg.ts's `stream()` comment. Both resulting errors are
-    // caught inside the callback, so it returns normally — the same as a
-    // caller who only checked "did my transaction reject" and saw no. The
-    // outer `COMMIT` this method issues on the caller's behalf is what must
-    // now surface a typed rejection instead of a silent, lossy success.
+    // Constructs one specific, reliable way to leave a transaction's
+    // connection aborted — sibling B's savepoint created before sibling A's
+    // cursor, B fails, its `ROLLBACK TO SAVEPOINT` cascades onto A — purely
+    // as a deterministic repro tool, not as a claim about what typically
+    // causes this in production. It is not: driven through the public
+    // `trx(t).stream()` API instead (a 5,000-row sibling, same shape),
+    // sibling A stays healthy and the row persists — this exact cascade is
+    // only reachable by driving `adapter.stream()` directly, bypassing
+    // knex's Transform, which no real caller does. See the plain,
+    // streaming-free regression test below for the shape that actually
+    // matters to real users: any swallowed statement error inside a
+    // `db.transaction()` callback leaves the connection aborted the same
+    // way, no streaming involved.
     //
-    // Driven through `adapter.stream()` directly against the transaction's
-    // own connection, not `trx(t).stream()` — same reason as the
-    // premature-release test above: knex's Transform drains the adapter's
-    // generator eagerly, in the background, independent of this test's own
-    // `.next()` calls. With sibling A given only a couple of rows, that
-    // eagerness lets A's own generator race to natural completion (and
-    // voluntarily close its own cursor) before B ever fails, closing the
-    // window this test exists to hit. Direct, consumer-paced iteration
-    // leaves A's cursor genuinely open until this test asks for its next
-    // row. Own table, dropped in this test's own `finally`, so a failure
-    // here can't leak a row into the count-based assertion above.
-    test('db.transaction() rejects instead of silently committing nothing when a sibling stream cascade aborts it', async () => {
+    // Bypassing the Transform here is also load-bearing for a second reason
+    // (same as the premature-release test above): it drains the adapter's
+    // generator eagerly in the background, independent of this test's own
+    // `.next()` calls, so sibling A's own generator would otherwise race to
+    // natural completion before B ever fails. Own table, dropped in this
+    // test's own `finally`, so a failure here can't leak a row into the
+    // count-based assertion above.
+    test('db.transaction() rejects instead of silently committing nothing when its connection is left aborted by a low-level, non-public-API two-cursor cascade', async () => {
       const adapter = createPgAdapter({ url })
       const lossTable = `cf_knex_stream_commit_loss_${Math.random().toString(36).slice(2, 10)}`
       try {
@@ -663,6 +663,36 @@ if (process.env.POSTGRES_URL) {
         expect(proof).toBeFalsy()
       } finally {
         await db.schema.dropTableIfExists(lossTable)
+      }
+    })
+
+    // The shape that actually matters to real users, and the only one this
+    // check's dominant reachable path has anything to do with: no
+    // streaming, no savepoints — just a statement error caught inside a
+    // db.transaction() callback instead of left to propagate.
+    test('db.transaction() rejects instead of silently committing nothing when a plain, non-streaming statement error is swallowed', async () => {
+      const plainTable = `cf_knex_stream_commit_loss_plain_${Math.random().toString(36).slice(2, 10)}`
+      try {
+        await db.schema.createTable(plainTable, (t) => {
+          t.increments('id')
+          t.string('label')
+        })
+
+        let caught: unknown
+        await db
+          .transaction(async (trx) => {
+            await trx(plainTable).insert({ label: 'proof-of-work' })
+            await trx.raw('select 1 / 0').catch(() => {})
+          })
+          .catch((err) => {
+            caught = err
+          })
+
+        expect(caught).toBeInstanceOf(CfKnexError)
+        expect((caught as CfKnexError).code).toBe('COMMIT_SILENTLY_ROLLED_BACK')
+        expect(await db(plainTable).where('label', 'proof-of-work').first()).toBeFalsy()
+      } finally {
+        await db.schema.dropTableIfExists(plainTable)
       }
     })
   })
