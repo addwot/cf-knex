@@ -86,6 +86,13 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
       // an unrelated write from the *same* knex instance while it is still
       // uncommitted, which only comes out correctly if that write reaches
       // its own, separate connection.
+      //
+      // Requires the factory's pool to allow at least 2 simultaneous
+      // connections. A factory pinning `pool: { max: 1 }` cannot supply the
+      // second connection the "outside" insert below needs while the
+      // transaction still holds the only one — see the timeout branch
+      // below for what happens then, and why it fails fast with an
+      // explanation rather than hanging.
       test('a concurrent write outside an open transaction is not swallowed by its rollback', async () => {
         let releaseGate: () => void = () => {}
         const gate = new Promise<void>((resolve) => {
@@ -108,8 +115,37 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
         // isolated implementation.
         await new Promise((resolve) => setTimeout(resolve, 50))
 
-        await db(table).insert({ name: 'ivan-outside', score: 10 })
+        // A starved pool (e.g. `max: 1`) cannot supply a connection for this
+        // insert while the transaction above still holds the only one —
+        // naively awaiting it would then hang forever: the insert waits on
+        // a connection only the transaction can free, and the transaction
+        // waits on `gate`, which only this insert (once it resolves) goes
+        // on to release below. Race it against a short timeout instead, and
+        // release the gate on *both* paths, so a starved pool fails this
+        // one assertion with an explanation instead of hanging first this
+        // test (vitest's default per-test timeout) and then `afterAll`'s
+        // `db.destroy()` behind it (which would itself block forever on
+        // `pool.destroy()` waiting for the transaction's connection to come
+        // back) — 5+10 opaque seconds becoming the whole file reported as a
+        // failed suite, with no indication why.
+        const outsideInsert = db(table).insert({ name: 'ivan-outside', score: 10 })
+        outsideInsert.catch(() => {}) // observed via the race below either way; just suppressing an unhandled-rejection warning if it loses the race and fails later.
+        const starved = Symbol('pool starved')
+        const raced = await Promise.race([
+          outsideInsert,
+          new Promise((resolve) => setTimeout(() => resolve(starved), 2000)),
+        ])
         releaseGate()
+
+        if (raced === starved) {
+          // Let the transaction's own rollback finish before failing, so
+          // this test doesn't also leak a connection the pool believes is
+          // still checked out into whatever runs after it.
+          await trxPromise.catch(() => {})
+          throw new Error(
+            "timed out waiting for a second pooled connection — this case needs the factory's pool to allow at least 2 connections simultaneously ('pool: { max: 1 }' starves it)",
+          )
+        }
 
         await expect(trxPromise).rejects.toThrow('rollback')
         expect(await db(table).where('name', 'ivan-inside').first()).toBeFalsy()

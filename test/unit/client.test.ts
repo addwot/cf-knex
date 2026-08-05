@@ -9,6 +9,7 @@ test('generates dialect-appropriate SQL', async () => {
   await db('users').where('id', 1).select('name')
   expect(calls[0]?.sql).toBe('select `name` from `users` where `id` = ?')
   expect(calls[0]?.bindings).toEqual([1])
+  await db.destroy()
 })
 
 test('.first() returns a row, not an array (Defect A regression)', async () => {
@@ -17,30 +18,35 @@ test('.first() returns a row, not an array (Defect A regression)', async () => {
   const row = await db('videos').first()
   expect(row).toEqual({ id: 1, tags: 'a,b' })
   expect(Array.isArray(row)).toBe(false)
+  await db.destroy()
 })
 
 test('.insert() returns the insert id (Defect B regression)', async () => {
   const { adapter } = createFakeAdapter({ dialect: 'mysql', result: { rows: [], insertId: 99 } })
   const db = createKnexClient(adapter)
   expect(await db('users').insert({ name: 'x' })).toEqual([99])
+  await db.destroy()
 })
 
 test('.update() returns the affected row count', async () => {
   const { adapter } = createFakeAdapter({ dialect: 'mysql', result: { rows: [], affectedRows: 4 } })
   const db = createKnexClient(adapter)
   expect(await db('users').where('id', 1).update({ name: 'y' })).toBe(4)
+  await db.destroy()
 })
 
 test('postgres selects return rows', async () => {
   const { adapter } = createFakeAdapter({ dialect: 'postgres', result: { rows: [{ id: 1 }], command: 'SELECT' } })
   const db = createKnexClient(adapter)
   expect(await db('users').select('*')).toEqual([{ id: 1 }])
+  await db.destroy()
 })
 
 test('sqlite inserts return lastID', async () => {
   const { adapter } = createFakeAdapter({ dialect: 'sqlite', result: { rows: [], insertId: 5 } })
   const db = createKnexClient(adapter)
   expect(await db('users').insert({ name: 'x' })).toEqual([5])
+  await db.destroy()
 })
 
 test('constructing a sqlite client does not throw (colorette/logger regression)', () => {
@@ -123,7 +129,11 @@ test('caller-supplied knexOptions cannot break the client or the sqlite defaults
   // omitting `filename` here would otherwise reintroduce the
   // colorette/logger crash documented in src/core/client.ts.
   const { adapter: sqliteAdapter } = createFakeAdapter({ dialect: 'sqlite' })
-  expect(() => createKnexClient(sqliteAdapter, { connection: {} })).not.toThrow()
+  let sqliteDb: ReturnType<typeof createKnexClient> | undefined
+  expect(() => {
+    sqliteDb = createKnexClient(sqliteAdapter, { connection: {} })
+  }).not.toThrow()
+  await sqliteDb?.destroy()
 
   // `client` must always be `CfKnexClient` -- a caller-supplied `client`
   // must not replace it, or every adapter call stops working.
@@ -132,4 +142,23 @@ test('caller-supplied knexOptions cannot break the client or the sqlite defaults
   const db = createKnexClient(adapter, { client: NotOurClient })
   await db('users').where('id', 1).select('name')
   expect(calls[0]?.sql).toBe('select `name` from `users` where `id` = ?')
+  await db.destroy()
+})
+
+test("an explicit caller pool option overrides the Workers-appropriate default (min: 0, max: 5)", async () => {
+  // createKnexClient defaults to `pool: { min: 0, max: 5 }` (see the
+  // `poolDefault` comment in src/core/client.ts) specifically because this
+  // library's usage pattern is a fresh client per request -- but knex/tarn
+  // read whatever `pool` config actually reaches `Knex()`, so a caller who
+  // knows their own workload (e.g. a long-lived Node process, not a Worker
+  // isolate) must still be able to opt back into a warmer pool. Asserting
+  // this from the outside, black-box, via tarn's own reported pool state
+  // (`db.client.pool`) rather than by reaching into createKnexClient's
+  // internals -- this is what a caller actually observes.
+  const { adapter } = createFakeAdapter({ dialect: 'mysql' })
+  const db = createKnexClient(adapter, { pool: { min: 1, max: 3 } })
+  const pool = (db.client as unknown as { pool: { min: number; max: number } }).pool
+  expect(pool.min).toBe(1)
+  expect(pool.max).toBe(3)
+  await db.destroy()
 })

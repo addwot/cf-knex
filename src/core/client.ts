@@ -97,12 +97,18 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // Reading that property on one of this project's handles would throw
     // (not just return false), which tarn would treat as "invalid, discard
     // immediately" — silently defeating pooling on every acquire. Handle
-    // liveness is the adapter's concern, not the pool's; always reporting
-    // valid here and letting `execute()` surface a real connection failure
-    // as a query error is the correct default until an adapter needs
-    // otherwise.
-    validateConnection(): boolean {
-      return true
+    // liveness is genuinely the adapter's concern, not the pool's — but
+    // "the adapter's concern" has to mean something the adapter can act on,
+    // not just a comment here promising it does: `DriverAdapter.validate`
+    // (src/core/types.ts) is the hook for that. Delegate to it when an
+    // adapter implements it (a handle that can go stale between queries,
+    // e.g. mysql2's TCP connection, needs this to avoid the pool handing
+    // out a connection MySQL already killed server-side); default to always
+    // valid when it doesn't (HTTP-backed and binding-backed handles can't go
+    // stale this way, and knex's own stricter default would wrongly discard
+    // them).
+    validateConnection(handle: unknown): boolean {
+      return adapter.validate ? adapter.validate(handle) : true
     }
 
     async _query(handle: unknown, obj: Record<string, unknown>) {
@@ -126,7 +132,25 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // overriding `destroy` here is reached the same way the overrides above
     // are. `super.destroy()` first reuses the base pool-teardown sequence
     // (including its own `_ownsPool` guard) before `adapter.destroy()` runs.
+    //
+    // But `this` is not always the real client: knex's transaction machinery
+    // (execution/transaction.js's `makeTxClient`) builds a *transactor*
+    // client via `Object.create(client.constructor.prototype)` — sharing
+    // this exact prototype, so `trx.destroy()` resolves to this same method
+    // — and marks it with an own `transacting: true` property the real
+    // client never has. That transactor has no pool of its own (`super.destroy()`
+    // already no-ops for it, since its inherited `this.pool` is `undefined`),
+    // but nothing before this fix-round stopped `adapter.destroy()` from
+    // running anyway: calling `trx.destroy()` inside a transaction would
+    // tear down every connection the *adapter* holds, including the one the
+    // transaction itself is still using to COMMIT — breaking the parent
+    // `db` permanently, not just the transaction. Guard it the same way
+    // knex's own pool implicitly does for itself.
     async destroy(callback?: (err?: unknown) => void): Promise<void> {
+      if ((this as unknown as { transacting?: boolean }).transacting) {
+        if (typeof callback === 'function') callback()
+        return
+      }
       try {
         await super.destroy()
         await adapter.destroy()
@@ -147,12 +171,31 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
   // it, since `adapter` (not knex) owns the connection.
   const connectionDefault: Record<string, unknown> = adapter.dialect === 'sqlite' ? { filename: ':memory:' } : {}
 
+  // Overrides knex's inherited pool default (`min: 2, max: 10`). This
+  // library's documented usage pattern is a fresh client per request, never
+  // one cached in a module-level global — Hyperdrive already pools
+  // server-side, and reusing a cached knex/socket object across requests
+  // throws workerd's "Cannot perform I/O on behalf of a different request".
+  // Under that pattern `min: 2` means every single request eagerly opens
+  // two connections even if it runs exactly one query, and they are never
+  // reclaimed: tarn's own reap arithmetic (`maxDestroy = free.length -
+  // (min - used.length)`, verified against
+  // node_modules/.pnpm/tarn@3.1.2's Pool.js `check()`) is ≤ 0 whenever at
+  // most `min` connections are sitting idle, so the idle-timeout reaper
+  // never fires on them — they just sit open until the request-scoped
+  // client itself is destroyed. `min: 0` means nothing opens until a query
+  // actually needs it; `max: 5` is a modest per-client ceiling, not a
+  // promise every adapter/database combination can sustain concurrently.
+  const poolDefault: Record<string, unknown> = { pool: { min: 0, max: 5 } }
+
   // `client` must always be `CfKnexClient` (a caller-supplied one would
   // defeat this function), and `connection`/`log` must merge with their
   // defaults rather than replace them (an incomplete caller `connection`
   // would otherwise reintroduce the sqlite crash above) — handled
-  // explicitly below rather than by spread order. Everything else overrides
-  // freely.
+  // explicitly below rather than by spread order. `pool` and everything
+  // else override freely: a caller-supplied `pool` (already passed through
+  // via this same `restOptions` spread today) fully replaces `poolDefault`
+  // above it, exactly like `dialectDefaults`.
   const { connection: callerConnection, log: callerLog, ...restOptions } = knexOptions as Record<string, unknown> & {
     connection?: Record<string, unknown>
     log?: Record<string, unknown>
@@ -160,6 +203,7 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
 
   return Knex({
     ...dialectDefaults,
+    ...poolDefault,
     ...restOptions,
     connection: { ...connectionDefault, ...callerConnection },
     log: { ...DEFAULT_LOG, ...callerLog },

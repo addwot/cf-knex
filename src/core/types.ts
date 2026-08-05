@@ -37,7 +37,23 @@ export type AdapterCapabilities = {
  * - `destroy()` tears down adapter-level state that outlives any single
  *   handle (e.g. connections the adapter opened that never made it back
  *   through `release`, cached clients, etc). Called once, after the pool
- *   has already released everything it currently holds.
+ *   has already released everything it currently holds. May be called more
+ *   than once over an adapter's lifetime (e.g. a caller calling
+ *   `knex.destroy()` twice) — implementations must tolerate that safely,
+ *   the same way ending an already-ended connection a second time is safe.
+ *
+ * `validate(handle)` is optional and exists solely so a *pooled* handle can
+ * be told apart from a dead one before knex hands it back out for a query —
+ * without it, a connection that died while sitting idle in the pool (killed
+ * server-side, network drop) stays in rotation forever and poisons every
+ * later query with a stale, permanently-broken handle. Return `false` only
+ * when the handle is known dead; the pool then discards it (via `release`)
+ * and creates a fresh one instead. Omit `validate` entirely for handles that
+ * can't go stale between queries this way — HTTP-backed adapters
+ * (tidb-http) reopen nothing, and binding-backed ones (D1) hand out an
+ * object with no underlying session to drop. `createKnexClient` treats a
+ * missing `validate` as "always valid", which is correct for those and
+ * would be actively wrong to default to a stricter check.
  */
 export type DriverAdapter = {
   readonly dialect: Dialect
@@ -45,6 +61,7 @@ export type DriverAdapter = {
   readonly capabilities: AdapterCapabilities
   acquire(): Promise<unknown>
   release(handle: unknown): Promise<void>
+  validate?(handle: unknown): boolean
   execute(handle: unknown, sql: string, bindings: unknown[]): Promise<RawResult>
   stream?(handle: unknown, sql: string, bindings: unknown[]): AsyncIterable<unknown>
   destroy(): Promise<void>

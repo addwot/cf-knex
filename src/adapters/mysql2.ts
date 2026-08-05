@@ -3,17 +3,41 @@ import type { Credentials, DriverAdapter, RawResult } from '../core/types'
 import type { Connection, ConnectionOptions, FieldPacket, QueryResult, QueryValues } from 'mysql2/promise'
 
 /**
- * mysql2/promise's own `Connection` class composes `.query()` through mixin
- * helpers (`QueryableBase`/`ExecutableBase` in its `.d.ts`) that this
- * project's TypeScript setup does not resolve into an instance member —
- * `.end()`, declared directly on the class body, checks fine; `.query()`,
- * contributed only through that mixin chain, does not, even though both
- * exist at runtime. Declare just the one overload this adapter calls,
- * typed against mysql2's own exported result/value types, rather than
- * casting the call away untyped.
+ * mysql2/promise's own `Connection` class composes both `.query()` and
+ * `.on()` through mixin helpers (`QueryableBase`/`ExecutableBase`, plus
+ * extending `EventEmitter`, per its `.d.ts` and
+ * mysql2/lib/promise/connection.js) that this project's TypeScript setup
+ * does not resolve into instance members — `.end()`, declared directly on
+ * the class body, checks fine; these two, contributed only through that
+ * mixin/inheritance chain, do not, even though all three exist at runtime.
+ * Declare just the members this adapter actually calls, typed against
+ * mysql2's own exported result/value types where relevant, rather than
+ * casting every call away untyped.
  */
-type QueryableConnection = {
+type Mysql2ConnectionShim = {
   query(sql: string, values?: QueryValues): Promise<[QueryResult, FieldPacket[]]>
+  on(event: 'error', listener: (err: Error) => void): void
+}
+
+/**
+ * The subset of mysql2's *internal* connection state this adapter reads to
+ * decide whether a pooled handle is still usable — the same four fields
+ * knex's own stock mysql2 dialect reads for the same purpose
+ * (node_modules/knex/lib/dialects/mysql2/index.js's `validateConnection`).
+ * None of these are part of mysql2's public `.d.ts` (they're underscore-
+ * prefixed / undocumented); verified directly against
+ * node_modules/mysql2/lib/base/connection.js, which sets `_fatalError`/
+ * `_protocolError`/`_closing` on protocol errors and dropped sockets, and
+ * `stream.destroyed` once the underlying TCP socket is gone. `mysql2/promise`'s
+ * `Connection` wraps this raw connection at `.connection` — one layer deeper
+ * than knex's own dialect reads, since knex talks to the raw connection
+ * directly and this adapter hands out the promise wrapper instead.
+ */
+type RawMysql2Connection = {
+  _fatalError: unknown
+  _protocolError: unknown
+  _closing: boolean
+  stream: { destroyed: boolean }
 }
 
 /**
@@ -95,6 +119,15 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
   // before `destroy()` ever runs, so this should usually be empty by then.
   const open = new Set<Connection>()
 
+  // Handles a network error or a server-side `KILL` marked dead by the
+  // `error` listener attached in `acquire()` below. `validate()` also
+  // inspects the connection's own internal state directly (belt-and-
+  // braces: the two should always agree, since that internal state is what
+  // *causes* the 'error' event in the first place), so this set mostly
+  // exists to make the "why is this dead" question answerable from one
+  // place rather than re-deriving it from private mysql2 fields every time.
+  const dead = new WeakSet<Connection>()
+
   return {
     dialect: 'mysql',
     driver: 'mysql2',
@@ -118,6 +151,14 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
       // separately-visible state.
       const conn = await mysql.createConnection(config)
       open.add(conn)
+      // `PromiseConnection` (this adapter's handle type) re-emits the raw
+      // connection's 'error' event, and Node's EventEmitter throws on an
+      // unhandled 'error' event by default — without a listener here, a
+      // connection that drops while idle in the pool (server restart,
+      // `KILL`, network blip) would crash the whole process, not just fail
+      // its next query. Listening also marks the handle dead for `validate()`
+      // below, so the pool discards it instead of handing it back out.
+      ;(conn as unknown as Mysql2ConnectionShim).on('error', () => dead.add(conn))
       return conn
     },
 
@@ -134,8 +175,31 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
       await conn.end()
     },
 
+    // Tarn calls this before handing a pooled handle back out for a query —
+    // without it, a connection MySQL closed server-side (`KILL`, a restart,
+    // an idle-timeout on the server's side) while sitting idle in the pool
+    // stays in rotation forever: every later query on it fails with mysql2's
+    // "Can't add new command when connection is in closed state", and unlike
+    // the stock knex mysql2 dialect (which discards a dead connection and
+    // creates a fresh one on the very next acquire), nothing here would ever
+    // self-heal. Two checks, either sufficient on its own: the `error`-
+    // listener flag set in `acquire()` (catches the common case, a network
+    // error firing while nothing is querying the connection), and the same
+    // four internal-state fields knex's own mysql2 dialect reads (catches
+    // the handshake having already failed a way that never emitted 'error'
+    // on this specific handle). `conn.connection` is the raw connection
+    // `PromiseConnection` wraps — see the `RawMysql2Connection` comment
+    // above for why this reads one layer deeper than knex's own dialect.
+    validate(handle: unknown): boolean {
+      const conn = handle as Connection
+      if (dead.has(conn)) return false
+      const raw = (conn as unknown as { connection?: RawMysql2Connection }).connection
+      if (!raw) return false
+      return !raw._fatalError && !raw._protocolError && !raw._closing && !raw.stream.destroyed
+    },
+
     async execute(handle, sql, bindings): Promise<RawResult> {
-      const conn = handle as unknown as QueryableConnection
+      const conn = handle as unknown as Mysql2ConnectionShim
       const [rows, fields] = await conn.query(sql, bindings as unknown as QueryValues)
       return toRawResult(rows, fields)
     },
