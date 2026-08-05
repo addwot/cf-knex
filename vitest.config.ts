@@ -7,6 +7,12 @@ import { defineConfig } from 'vitest/config'
 // resolve. `workers` runs inside workerd for anything that must be proven
 // to work there; `node` runs in plain Node for real TCP driver tests.
 //
+// The two `include` globs below are a runtime boundary, not a test-kind
+// boundary: `test/unit/**` means "runs in workerd", `test/integration/**`
+// means "runs in plain Node" — a binding-backed adapter's conformance suite
+// (e.g. D1's, which needs `env.DB` and only exists inside workerd) belongs
+// under `test/unit/` for that reason, not as a misfiling.
+//
 // Forwarding a host env var into a workerd test: this config file runs in
 // Node and can read `process.env` directly, but test bodies in the
 // `workers` project run inside workerd, where `process.env` holds only a
