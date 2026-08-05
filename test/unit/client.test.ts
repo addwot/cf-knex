@@ -107,7 +107,7 @@ test('generates dialect-appropriate SQL', async () => {
   await db.destroy()
 })
 
-test('.first() returns a row, not an array (Defect A regression)', async () => {
+test('.first() returns a row, not an array', async () => {
   const { adapter } = createFakeAdapter({ dialect: 'mysql', result: { rows: [{ id: 1, tags: 'a,b' }] } })
   const db = createKnexClient(adapter)
   const row = await db('videos').first()
@@ -116,7 +116,7 @@ test('.first() returns a row, not an array (Defect A regression)', async () => {
   await db.destroy()
 })
 
-test('.insert() returns the insert id (Defect B regression)', async () => {
+test('.insert() returns the insert id', async () => {
   const { adapter } = createFakeAdapter({ dialect: 'mysql', result: { rows: [], insertId: 99 } })
   const db = createKnexClient(adapter)
   expect(await db('users').insert({ name: 'x' })).toEqual([99])
@@ -179,7 +179,7 @@ test('_stream() throws CfKnexError with code UNSUPPORTED_CAPABILITY', () => {
   }
 })
 
-test('_stream() throws CfKnexError even when capabilities.streaming is true, if the adapter has no stream() (A9: gate on both)', () => {
+test('_stream() throws CfKnexError even when capabilities.streaming is true, if the adapter has no stream() (gates on both the capability and a real stream())', () => {
   // Regression coverage for A9: `capabilities.streaming` is only a claim;
   // `adapter.stream` existing is the proof. An adapter that sets the flag
   // without implementing the method must still fail with this project's own
@@ -265,7 +265,7 @@ test('_stream() writes every row from the adapter, in order, and ends the sink (
   expect(isEnded()).toBe(true)
 })
 
-test('_stream() awaits drain before writing the next row when the sink reports backpressure (A5 regression)', async () => {
+test('_stream() awaits drain before writing the next row when the sink reports backpressure', async () => {
   // Regression coverage for a real defect class ("silently-wrong success"):
   // writing every row regardless of the sink's own `write()` return value
   // buffers the *entire* result set in the sink's memory the moment a
@@ -305,7 +305,7 @@ test('_stream() awaits drain before writing the next row when the sink reports b
   expect(isEnded()).toBe(true)
 })
 
-test('_stream() rejects and emits on the sink when the adapter stream throws mid-iteration (A4 dual-signal contract)', async () => {
+test('_stream() rejects and emits on the sink when the adapter stream throws mid-iteration (both signals, not just one)', async () => {
   const boom = new Error('boom')
   const { adapter } = createFakeAdapter({
     dialect: 'mysql',
@@ -537,7 +537,7 @@ test('caller-supplied knexOptions cannot break the client or the sqlite defaults
   await db.destroy()
 })
 
-test('a handle validate() marks stale is evicted and a fresh one acquired on the next query (Finding A regression)', async () => {
+test('a handle validate() marks stale is evicted and a fresh one acquired on the next query', async () => {
   // Regression coverage for a real bug: `validateConnection` used to return
   // `true` unconditionally, so a connection that died while sitting idle in
   // the pool (server-side `KILL`, network drop) stayed in rotation forever
@@ -570,7 +570,7 @@ test('a handle validate() marks stale is evicted and a fresh one acquired on the
   await db.destroy()
 })
 
-test('trx.destroy() inside an open transaction does not tear down the adapter or break the parent db (Finding C regression)', async () => {
+test('trx.destroy() inside an open transaction does not tear down the adapter or break the parent db', async () => {
   // Regression coverage for a real bug: `destroy()` used to call
   // `adapter.destroy()` unconditionally, but knex's transactor client
   // shares the real client's prototype (execution/transaction.js's

@@ -4,7 +4,7 @@ import { toKnexResponse } from '../../src/core/response'
 
 const obj = { method: 'select', sql: 'select 1', bindings: [] }
 
-test('preserves every field of the incoming obj (Defect A regression)', () => {
+test('preserves every field of the incoming obj', () => {
   const out = toKnexResponse('mysql', { rows: [] }, obj)
   expect(out.method).toBe('select')
   expect(out.sql).toBe('select 1')
@@ -15,7 +15,7 @@ test('mysql wraps rows and fields in an array', () => {
   expect(out.response).toEqual([[{ a: 1 }], ['a']])
 })
 
-test('mysql attaches insertId and affectedRows to the rows array (Defect B regression)', () => {
+test('mysql attaches insertId and affectedRows to the rows array', () => {
   const out = toKnexResponse('mysql', { rows: [], insertId: 42, affectedRows: 3 }, obj)
   const rows = (out.response as unknown[])[0] as { insertId: number; affectedRows: number }
   expect(rows.insertId).toBe(42)
@@ -33,7 +33,7 @@ test('sqlite returns a bare rows array and puts write metadata on context', () =
   expect(out.context).toEqual({ lastID: 7, changes: 2 })
 })
 
-test('preserves every field of the incoming obj, including non-method keys (Defect A regression, postgres)', () => {
+test('preserves every field of the incoming obj, including non-method keys (postgres)', () => {
   const richObj = { method: 'select', sql: 'select 1', bindings: [], returning: ['id'] }
   const out = toKnexResponse('postgres', { rows: [{ a: 1 }], command: 'SELECT' }, richObj)
   expect(out.method).toBe('select')
@@ -41,7 +41,7 @@ test('preserves every field of the incoming obj, including non-method keys (Defe
   expect(out.returning).toEqual(['id'])
 })
 
-test('preserves every field of the incoming obj (Defect A regression, sqlite)', () => {
+test('preserves every field of the incoming obj (sqlite)', () => {
   const out = toKnexResponse('sqlite', { rows: [] }, obj)
   expect(out.method).toBe('select')
   expect(out.sql).toBe('select 1')

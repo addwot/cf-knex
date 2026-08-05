@@ -2,7 +2,7 @@ import { expect, test, vi } from 'vitest'
 import { CfKnexError } from '../../src/core/errors'
 import { createTidbHttpAdapter } from '../../src/adapters/tidb-http'
 
-test('requests fullResult and maps write metadata (Defect B regression)', async () => {
+test('requests fullResult and maps write metadata', async () => {
   const execute = vi.fn().mockResolvedValue({ rows: [], rowsAffected: 3, lastInsertId: 42 })
   const adapter = createTidbHttpAdapter({ url: 'mysql://u:p@x.tidbcloud.com:4000/db' })
   const raw = await adapter.execute({ execute }, 'insert into t values (?)', [1])

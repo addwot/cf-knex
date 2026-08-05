@@ -13,7 +13,8 @@ import type { FullResult } from '@tidbcloud/serverless'
  * conditional resolve to `FullResult` rather than the bare `Row[]` shape used
  * in fire-and-forget mode — `FullResult` is the only shape that carries
  * `rowsAffected`/`lastInsertId`, and forgetting to request it is exactly the
- * write-metadata bug (Defect B) this adapter exists to avoid.
+ * write-metadata bug this adapter exists to avoid: an insert reporting no
+ * affected rows and no insert id.
  */
 type TidbConnection = {
   execute(query: string, args: unknown[], options: { fullResult: true }): Promise<FullResult>

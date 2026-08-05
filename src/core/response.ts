@@ -44,8 +44,8 @@ export function toKnexResponse(
     // `resp.command === 'SELECT'` first and only reaches the UPDATE|DELETE ->
     // rowCount branch if that test fails. Defaulting a missing `command` to
     // 'SELECT' would silently misroute any DELETE/UPDATE whose adapter forgot
-    // to set it, reporting `[]` instead of the affected-row count — Defect B's
-    // exact signature. `pg` always populates `command` on a real `Result`, so
+    // to set it, reporting `[]` instead of the affected-row count — the exact
+    // signature of the lost-write-metadata bug this file guards against. `pg` always populates `command` on a real `Result`, so
     // a missing one is an adapter bug: fail loudly at the source instead of
     // returning silently wrong data.
     if (!raw.command) {
