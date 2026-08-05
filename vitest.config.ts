@@ -11,8 +11,10 @@ import { defineConfig } from 'vitest/config'
 // Node and can read `process.env` directly, but test bodies in the
 // `workers` project run inside workerd, where `process.env` holds only a
 // handful of Vite-injected keys, never host environment variables. Forward
-// the value as a `miniflare.bindings` entry on the `workers` project below
-// and declare the matching field on `Cloudflare.Env` in test/env.d.ts. The
+// the value as a `miniflare: { bindings: { … } }` entry inside the
+// `cloudflareTest({ … })` call below — miniflare is an option of that
+// plugin, not of the project object or its `test` block — and declare the
+// matching field on `Cloudflare.Env` in test/env.d.ts. The
 // `node` project needs no such forwarding — its tests run in real Node and
 // can read `process.env` directly.
 export default defineConfig({
