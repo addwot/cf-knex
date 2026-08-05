@@ -1,11 +1,16 @@
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { defineConfig } from 'vitest/config'
 
-// Two projects, because @cloudflare/vitest-pool-workers cannot import
-// `mysql2` or `pg` at all — both are CJS packages with dual ESM/CJS exports
-// maps and bare Node-builtin requires the pool's module loader can't
-// resolve. `workers` runs inside workerd for anything that must be proven
-// to work there; `node` runs in plain Node for real TCP driver tests.
+// Three projects. `workers`/`node` split because @cloudflare/vitest-pool-workers
+// cannot import `mysql2` or `pg` at all — both are CJS packages with dual
+// ESM/CJS exports maps and bare Node-builtin requires the pool's module
+// loader can't resolve. `workers` runs inside workerd for anything that
+// must be proven to work there; `node` runs in plain Node for real TCP
+// driver tests. `types` is separate again: `typecheck.enabled` runs tsc over
+// its files *and* still executes their `test()` bodies as ordinary runtime
+// code (confirmed directly — see test/types/api.test-d.ts's own comments
+// for what that requires its fixtures to tolerate), so it needs its own
+// `include` rather than folding into `node`.
 //
 // The two `include` globs below are a runtime boundary, not a test-kind
 // boundary: `test/unit/**` means "runs in workerd", `test/integration/**`
@@ -38,6 +43,14 @@ export default defineConfig({
           name: 'node',
           environment: 'node',
           include: ['test/integration/**/*.test.ts'],
+        },
+      },
+      {
+        test: {
+          name: 'types',
+          environment: 'node',
+          typecheck: { enabled: true, include: ['test/types/**/*.test-d.ts'] },
+          include: ['test/types/**/*.test-d.ts'],
         },
       },
     ],

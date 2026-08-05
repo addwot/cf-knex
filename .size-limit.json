@@ -1,0 +1,13 @@
+[
+  { "name": "cf-knex/d1", "path": "dist/d1.js", "limit": "6 kB", "ignore": ["knex"] },
+  { "name": "cf-knex/tidb", "path": "dist/tidb.js", "limit": "6 kB", "ignore": ["knex", "@tidbcloud/serverless"] },
+  { "name": "cf-knex/turso", "path": "dist/turso.js", "limit": "6 kB", "ignore": ["knex", "@libsql/client"] },
+  { "name": "cf-knex/mysql", "path": "dist/mysql.js", "limit": "6 kB", "ignore": ["knex", "mysql2"] },
+  { "name": "cf-knex/postgres", "path": "dist/postgres.js", "limit": "6 kB", "ignore": ["knex", "pg"] },
+  {
+    "name": "cf-knex (root)",
+    "path": "dist/index.js",
+    "limit": "15 kB",
+    "ignore": ["knex", "mysql2", "pg", "@tidbcloud/serverless", "@libsql/client"]
+  }
+]
