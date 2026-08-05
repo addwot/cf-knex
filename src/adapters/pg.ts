@@ -104,7 +104,19 @@ export type PgAdapterOptions = {
   hyperdrive?: HyperdriveConfig
 }
 
-function resolveConfig(opts: PgAdapterOptions): Record<string, unknown> {
+/**
+ * Exported so a test can assert directly on its output shape rather than
+ * only through a live connection — see the comment above `hyperdriveFrom` in
+ * test/integration/pg.test.ts for why a live connection genuinely cannot
+ * distinguish this function's hyperdrive branch from `{ ...opts.hyperdrive }`
+ * when the shim's `connectionString` and its five discrete fields describe
+ * the same address (pg's own `ConnectionParameters` overwrites the discrete
+ * fields with whatever `parse(connectionString)` returns regardless of which
+ * one this function handed it, so both shapes reach `pg.Client` carrying
+ * identical values in that case). A structural assertion on this function's
+ * *return value*, before any of it reaches pg, has no such blind spot.
+ */
+export function resolveConfig(opts: PgAdapterOptions): Record<string, unknown> {
   if (opts.hyperdrive) {
     // Explicit destructure of exactly the one field this adapter wants, not
     // `{ ...opts.hyperdrive }`: a real Cloudflare `Hyperdrive` binding

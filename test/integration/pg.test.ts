@@ -1,5 +1,5 @@
-import { test } from 'vitest'
-import { createPgAdapter } from '../../src/adapters/pg'
+import { expect, test } from 'vitest'
+import { createPgAdapter, resolveConfig } from '../../src/adapters/pg'
 import { createKnexClient } from '../../src/core/client'
 import { runConformanceSuite } from '../support/conformance'
 
@@ -33,16 +33,29 @@ if (process.env.POSTGRES_URL) {
 // against.
 //
 // Instead, build a plain object shaped like a real binding by parsing
-// POSTGRES_URL, and run the full conformance suite against that — with all
-// six fields a real `Hyperdrive` binding carries (`host`, `port`, `user`,
-// `password`, `database`, *and* `connectionString`), not just
-// `connectionString` alone. A one-field shim would pass this suite even if
-// src/adapters/pg.ts spread the whole binding into pg's config instead of
-// destructuring just `connectionString` out of it (see that file's
-// `resolveConfig` comment for why a spread is actively wrong for pg) —
-// nothing would ever populate the other five fields to go wrong. Building
-// all six, exactly like a real binding would hand the adapter, is what
-// actually proves the destructure is doing something.
+// POSTGRES_URL — with all six fields a real `Hyperdrive` binding carries
+// (`host`, `port`, `user`, `password`, `database`, *and* `connectionString`),
+// not just `connectionString` alone — and run the full conformance suite
+// against that.
+//
+// This live suite does NOT, on its own, prove that src/adapters/pg.ts's
+// `resolveConfig` destructures `connectionString` out of the binding rather
+// than spreading it whole. pg's own `ConnectionParameters` constructor
+// overwrites every discrete field with whatever `parse(connectionString)`
+// returns, and because the five discrete fields below are derived from that
+// same URL, the parsed values and the spread values are identical either
+// way — the merge is a no-op regardless of which shape `resolveConfig`
+// returns, so this suite passes under a reverted `{ ...opts.hyperdrive }`
+// spread exactly as well as it does under the real destructure. (An earlier
+// version of this comment claimed a one-field shim was needed to prove the
+// destructure "actually holds" and that a spread would fail it — that was
+// wrong, and nothing here or in a six-field object fixes it: the suite
+// cannot distinguish the two shapes at all, live, regardless of field
+// count.) What this suite is still good for: proving the adapter doesn't
+// choke on a realistic six-field object and exercising everything
+// downstream of a successful connection. The actual destructure-vs-spread
+// regression check is the structural test below, which inspects
+// `resolveConfig`'s return value directly instead of going through pg.
 function hyperdriveFrom(url: string) {
   const u = new URL(url)
   return {
@@ -54,6 +67,28 @@ function hyperdriveFrom(url: string) {
     connectionString: url,
   }
 }
+
+// Runs unconditionally — no live database needed, since `resolveConfig` is a
+// pure function that never imports `pg` itself (only `acquire()` does, and
+// this test never calls it) — and asserts on `resolveConfig`'s return value
+// directly, before any of it reaches pg's own `ConnectionParameters`. This is
+// the check the comment above explains a live connection cannot perform:
+// `{ ...opts.hyperdrive }` and `{ connectionString }` are trivially
+// distinguishable here. Asserts the exact key set, not merely that
+// `connectionString` is present, so this fails just as loudly if a future
+// edit spreads the binding *and* keeps `connectionString` as it would if
+// `connectionString` were dropped entirely.
+test('pg adapter hyperdrive config reads only connectionString, never the five credential fields', () => {
+  const hyperdrive = {
+    host: 'h',
+    port: 5432,
+    user: 'u',
+    password: 'p',
+    database: 'd',
+    connectionString: 'postgres://u:p@h:5432/d',
+  }
+  expect(Object.keys(resolveConfig({ hyperdrive }))).toEqual(['connectionString'])
+})
 
 if (process.env.POSTGRES_URL) {
   const hyperdrive = hyperdriveFrom(process.env.POSTGRES_URL)
