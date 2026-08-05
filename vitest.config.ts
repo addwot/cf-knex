@@ -1,49 +1,37 @@
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { defineConfig } from 'vitest/config'
 
+// Two projects, because @cloudflare/vitest-pool-workers cannot import
+// `mysql2` or `pg` at all — both are CJS packages with dual ESM/CJS exports
+// maps and bare Node-builtin requires the pool's module loader can't
+// resolve. `workers` runs inside workerd for anything that must be proven
+// to work there; `node` runs in plain Node for real TCP driver tests.
+//
+// Forwarding a host env var into a workerd test: this config file runs in
+// Node and can read `process.env` directly, but test bodies in the
+// `workers` project run inside workerd, where `process.env` holds only a
+// handful of Vite-injected keys, never host environment variables. Forward
+// the value as a `miniflare.bindings` entry on the `workers` project below
+// and declare the matching field on `Cloudflare.Env` in test/env.d.ts. The
+// `node` project needs no such forwarding — its tests run in real Node and
+// can read `process.env` directly.
 export default defineConfig({
-  plugins: [
-    cloudflareTest({
-      wrangler: { configPath: './wrangler.jsonc' },
-      miniflare: {
-        // Why this binding exists: test bodies run inside workerd, not
-        // Node, and process.env there holds only ~7 Vite-injected keys —
-        // never host environment variables. This config file itself runs
-        // in Node, so it can read process.env and forward the value into
-        // the worker as a binding. This is the required pattern for any
-        // test that needs a live connection URL inside workerd.
-        //
-        // Why the fallback is `''`, not a URL: spec §5.3 requires that an
-        // absent connection URL make a conformance test skip with a
-        // printed notice, never silently pass or attempt a real
-        // connection. `if (!env.MYSQL_URL) skip(...)` is that skip signal
-        // — a non-empty default here would make the check always truthy
-        // and defeat it, turning "no container running" into a confusing
-        // ECONNREFUSED instead of an honest skip.
-        //
-        // How to run tests that consume this locally: export the var in
-        // your shell before invoking vitest, e.g.
-        //   cp .env.example .env && export $(grep -v '^#' .env | xargs) && pnpm test
-        // or set it inline per invocation:
-        //   MYSQL_URL=mysql://root:root@127.0.0.1:3306/cf_knex_test pnpm test
-        // (No .env auto-loading is wired up here on purpose: nothing
-        // currently consumes this binding, and whether to add one — e.g.
-        // via Vite's loadEnv(), already available transitively through
-        // vitest — is a call for whoever first needs it, not something to
-        // default into silently.)
-        //
-        // Known limitation: @cloudflare/vitest-pool-workers cannot import
-        // `mysql2` or `pg` at all — both are CJS packages with dual
-        // ESM/CJS exports maps and bare Node-builtin requires this pool's
-        // module loader can't resolve. Live driver tests against those two
-        // need a separate vitest project with `environment: 'node'`, not
-        // this workerd pool. Don't assume this pool can exercise a real
-        // driver — it can't, and the failure mode if you try is confusing.
-        bindings: {
-          MYSQL_URL: process.env.MYSQL_URL ?? '',
+  test: {
+    projects: [
+      {
+        plugins: [cloudflareTest({ wrangler: { configPath: './wrangler.jsonc' } })],
+        test: {
+          name: 'workers',
+          include: ['test/unit/**/*.test.ts'],
         },
       },
-    }),
-  ],
-  test: { include: ['test/**/*.test.ts'] },
+      {
+        test: {
+          name: 'node',
+          environment: 'node',
+          include: ['test/integration/**/*.test.ts'],
+        },
+      },
+    ],
+  },
 })

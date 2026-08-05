@@ -11,8 +11,8 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration",
+    "test:unit": "vitest run --project=workers",
+    "test:integration": "vitest run --project=node",
     "test:live": "vitest run test/live",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
