@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { createMysql2Adapter } from '../../src/adapters/mysql2'
 import { createPgAdapter } from '../../src/adapters/pg'
 import { createKnexClient } from '../../src/core/client'
+import { CfKnexError } from '../../src/core/errors'
 
 // Same reasoning as test/integration/mysql2.test.ts's `skip()`: every suite
 // below is conditional on a connection URL, so with no database configured
@@ -330,138 +331,142 @@ if (process.env.POSTGRES_URL) {
     test('two overlapping streams: an unrelated transaction must not share the connection while the slower ones cleanup is still in flight', async () => {
       const adapter = createPgAdapter({ url })
       const solo = createKnexClient(adapter, { pool: { min: 0, max: 1 } })
+      // Wrapped in try/finally, cleanup unconditional: this test inserts a
+      // row into the shared `overlapTable` fixture that the savepoint-
+      // cascade test below asserts an exact row count on. A failure partway
+      // through here (before the explicit cleanup that used to sit at the
+      // end, unguarded) leaked the row and produced a spurious, unrelated
+      // failure in that later test.
+      try {
+        // Getting this to reliably land on the wire in the vulnerable order
+        // took a few attempts. The obvious version — drain A, `.next()` once
+        // on B, then `.return()` it, both driven through `trx(table).stream()`
+        // — never worked: on a fast local connection, B's own abandoned-
+        // cleanup `CLOSE` consistently reached the wire before the
+        // interloper's `BEGIN` did, regardless of `Set` vs `Map`, because
+        // postgres serializes everything on one connection strictly FIFO in
+        // JS-call order, and an async generator's `.return()` reaches its own
+        // `finally` block (and thus issues `CLOSE`) faster than the outer
+        // transaction's commit-then-release-then-acquire chain reaches
+        // `BEGIN` — confirmed directly by instrumenting `validate()`/
+        // `handlesMidTeardown` while developing this test: the wrong answer
+        // genuinely happens, but with that ordering it's never *observable*.
+        //
+        // Trying to widen the window by leaving B's *next* `FETCH` genuinely
+        // unanswered at the moment of abandonment — by consuming exactly
+        // `FETCH_BATCH_SIZE` rows first — didn't work either, and not for a
+        // subtle reason: `trx(table).stream()` hands back knex's own
+        // `Transform` (node_modules/knex/lib/execution/runner.js), and
+        // `_stream()` (src/core/client.ts) drains the adapter's generator
+        // into it *eagerly*, independent of how many times a test calls
+        // `.next()` on the far end — confirmed by instrumenting `stream()`
+        // directly: the second `FETCH` for B was already sent, and often
+        // already answered, well before a 100-call consumption loop finished,
+        // so there was nothing left in flight to abandon into.
+        //
+        // What actually works: bypass that `Transform` layer and drive
+        // `adapter.stream()` directly — still against a connection obtained
+        // through a real `db.transaction()`, i.e. `trxClient.acquireConnection()`
+        // (node_modules/knex/lib/execution/transaction.js's `makeTxClient`,
+        // which just resolves the one connection the transaction already
+        // holds — not a separate acquire of a second connection). That is a
+        // real knex/tarn connection lifecycle end to end; only the row-by-row
+        // pull is driven directly, which is what makes it possible to leave a
+        // `FETCH` genuinely unanswered at the exact moment of abandonment.
+        // Captured from inside the callback below so the test can wait for
+        // B's own abandoned cleanup to genuinely finish before tearing the
+        // pool down — otherwise `solo.destroy()` can race B's still-in-flight
+        // `FETCH`/`CLOSE` and surface as an unhandled rejection ("Connection
+        // terminated") rather than a clean, awaited outcome. Both the
+        // in-flight `.next()` this abandons and the `.return()` racing it are
+        // captured — either one can be the call still holding an outstanding
+        // `FETCH` depending on exactly how the two interleave.
+        let bPendingNext: Promise<unknown> = Promise.resolve()
+        let bTeardown: Promise<unknown> = Promise.resolve()
 
-      // Getting this to reliably land on the wire in the vulnerable order
-      // took a few attempts. The obvious version — drain A, `.next()` once
-      // on B, then `.return()` it, both driven through `trx(table).stream()`
-      // — never worked: on a fast local connection, B's own abandoned-
-      // cleanup `CLOSE` consistently reached the wire before the
-      // interloper's `BEGIN` did, regardless of `Set` vs `Map`, because
-      // postgres serializes everything on one connection strictly FIFO in
-      // JS-call order, and an async generator's `.return()` reaches its own
-      // `finally` block (and thus issues `CLOSE`) faster than the outer
-      // transaction's commit-then-release-then-acquire chain reaches
-      // `BEGIN` — confirmed directly by instrumenting `validate()`/
-      // `handlesMidTeardown` while developing this test: the wrong answer
-      // genuinely happens, but with that ordering it's never *observable*.
-      //
-      // Trying to widen the window by leaving B's *next* `FETCH` genuinely
-      // unanswered at the moment of abandonment — by consuming exactly
-      // `FETCH_BATCH_SIZE` rows first — didn't work either, and not for a
-      // subtle reason: `trx(table).stream()` hands back knex's own
-      // `Transform` (node_modules/knex/lib/execution/runner.js), and
-      // `_stream()` (src/core/client.ts) drains the adapter's generator
-      // into it *eagerly*, independent of how many times a test calls
-      // `.next()` on the far end — confirmed by instrumenting `stream()`
-      // directly: the second `FETCH` for B was already sent, and often
-      // already answered, well before a 100-call consumption loop finished,
-      // so there was nothing left in flight to abandon into.
-      //
-      // What actually works: bypass that `Transform` layer and drive
-      // `adapter.stream()` directly — still against a connection obtained
-      // through a real `db.transaction()`, i.e. `trxClient.acquireConnection()`
-      // (node_modules/knex/lib/execution/transaction.js's `makeTxClient`,
-      // which just resolves the one connection the transaction already
-      // holds — not a separate acquire of a second connection). That is a
-      // real knex/tarn connection lifecycle end to end; only the row-by-row
-      // pull is driven directly, which is what makes it possible to leave a
-      // `FETCH` genuinely unanswered at the exact moment of abandonment.
-      // Captured from inside the callback below so the test can wait for
-      // B's own abandoned cleanup to genuinely finish before tearing the
-      // pool down — otherwise `solo.destroy()` can race B's still-in-flight
-      // `FETCH`/`CLOSE` and surface as an unhandled rejection ("Connection
-      // terminated") rather than a clean, awaited outcome. Both the
-      // in-flight `.next()` this abandons and the `.return()` racing it are
-      // captured — either one can be the call still holding an outstanding
-      // `FETCH` depending on exactly how the two interleave.
-      let bPendingNext: Promise<unknown> = Promise.resolve()
-      let bTeardown: Promise<unknown> = Promise.resolve()
+        const first = solo.transaction(async (trx) => {
+          const handle = await (
+            trx.client as unknown as { acquireConnection: () => Promise<unknown> }
+          ).acquireConnection()
 
-      const first = solo.transaction(async (trx) => {
-        const handle = await (
-          trx.client as unknown as { acquireConnection: () => Promise<unknown> }
-        ).acquireConnection()
+          const iterA = adapter.stream!(
+            handle,
+            `select label from ${overlapTable} where label like $1`,
+            ['a-%']
+          )[Symbol.asyncIterator]()
+          const iterB = adapter.stream!(
+            handle,
+            `select label from ${overlapTable} where label like $1`,
+            ['b-%']
+          )[Symbol.asyncIterator]()
 
-        const iterA = adapter.stream!(
-          handle,
-          `select label from ${overlapTable} where label like $1`,
-          ['a-%']
-        )[Symbol.asyncIterator]()
-        const iterB = adapter.stream!(
-          handle,
-          `select label from ${overlapTable} where label like $1`,
-          ['b-%']
-        )[Symbol.asyncIterator]()
+          // Both genuinely open at once — one row from each, interleaved —
+          // rather than one exhausting before the other starts.
+          await iterA.next()
+          await iterB.next()
 
-        // Both genuinely open at once — one row from each, interleaved —
-        // rather than one exhausting before the other starts.
-        await iterA.next()
-        await iterB.next()
+          // Exhaust B's first FETCH batch (FETCH_BATCH_SIZE, 100 rows,
+          // src/adapters/pg.ts) so the next `.next()` below must issue a
+          // fresh one.
+          for (let i = 1; i < 100; i++) await iterB.next()
 
-        // Exhaust B's first FETCH batch (FETCH_BATCH_SIZE, 100 rows,
-        // src/adapters/pg.ts) so the next `.next()` below must issue a
-        // fresh one.
-        for (let i = 1; i < 100; i++) await iterB.next()
+          // Drive A to completion normally...
+          let a = await iterA.next()
+          while (!a.done) a = await iterA.next()
 
-        // Drive A to completion normally...
-        let a = await iterA.next()
-        while (!a.done) a = await iterA.next()
+          // ...then race a genuinely in-flight `FETCH` against abandonment:
+          // start B's 101st row (a fresh round trip on the real connection,
+          // not yet answered) but don't await it, immediately request
+          // `.return()` too, and return without awaiting either — so the
+          // outer transaction's own commit is free to proceed while B's
+          // cleanup is still queued up behind that outstanding `FETCH`.
+          // `.catch()` attached immediately, right here, not merely awaited
+          // later by the test: whichever of these two ends up the one still
+          // holding the connection open when tarn evicts it (post-fix) or
+          // `solo.destroy()` tears it down (pre-fix, once the test's own
+          // assertions are done) rejects with "Connection terminated" on a
+          // later, unrelated tick — attaching a handler only when the test
+          // gets around to `await`-ing it is too late for Node to consider it
+          // handled.
+          bPendingNext = iterB.next().catch(() => {})
+          bTeardown = iterB.return!(undefined).catch(() => {})
+        })
 
-        // ...then race a genuinely in-flight `FETCH` against abandonment:
-        // start B's 101st row (a fresh round trip on the real connection,
-        // not yet answered) but don't await it, immediately request
-        // `.return()` too, and return without awaiting either — so the
-        // outer transaction's own commit is free to proceed while B's
-        // cleanup is still queued up behind that outstanding `FETCH`.
-        // `.catch()` attached immediately, right here, not merely awaited
-        // later by the test: whichever of these two ends up the one still
-        // holding the connection open when tarn evicts it (post-fix) or
-        // `solo.destroy()` tears it down (pre-fix, once the test's own
-        // assertions are done) rejects with "Connection terminated" on a
-        // later, unrelated tick — attaching a handler only when the test
-        // gets around to `await`-ing it is too late for Node to consider it
-        // handled.
-        bPendingNext = iterB.next().catch(() => {})
-        bTeardown = iterB.return!(undefined).catch(() => {})
-      })
+        // Started *before* `first` is awaited, not after: with `pool: {min:
+        // 0, max: 1}` this queues the interloper's own `acquireConnection`
+        // as a pending request on tarn's single resource, so it is handed
+        // the connection the instant `Transaction.acquireConnection`'s
+        // `finally` releases it — no extra acquire-call round trip in
+        // between that would otherwise give B's own abandoned cleanup query
+        // extra time to finish first and mask the bug. Reproduced live, with
+        // the fix reverted (`Set` in place of `Map`): the interloper's own
+        // `insert` itself throws — "current transaction is aborted, commands
+        // ignored until end of transaction block" — because B's still-in-
+        // flight `FETCH` response lands on the wire *inside* the interloper's
+        // own transaction and aborts it (3/3 runs); with the fix, tarn
+        // evicts the mid-teardown handle instead of handing it out, a fresh
+        // connection serves the interloper, and its insert and commit both
+        // succeed normally (3/3 runs).
+        const interloper = solo.transaction(async (trx) => {
+          await trx(overlapTable).insert({ label: 'interloper-commit' })
+        })
 
-      // Started *before* `first` is awaited, not after: with `pool: {min:
-      // 0, max: 1}` this queues the interloper's own `acquireConnection`
-      // as a pending request on tarn's single resource, so it is handed
-      // the connection the instant `Transaction.acquireConnection`'s
-      // `finally` releases it — no extra acquire-call round trip in
-      // between that would otherwise give B's own abandoned cleanup query
-      // extra time to finish first and mask the bug. Reproduced live, with
-      // the fix reverted (`Set` in place of `Map`): the interloper's own
-      // `insert` itself throws — "current transaction is aborted, commands
-      // ignored until end of transaction block" — because B's still-in-
-      // flight `FETCH` response lands on the wire *inside* the interloper's
-      // own transaction and aborts it (3/3 runs); with the fix, tarn
-      // evicts the mid-teardown handle instead of handing it out, a fresh
-      // connection serves the interloper, and its insert and commit both
-      // succeed normally (3/3 runs).
-      const interloper = solo.transaction(async (trx) => {
-        await trx(overlapTable).insert({ label: 'interloper-commit' })
-      })
+        await first
+        await interloper
 
-      await first
-      await interloper
+        // Not asserted on: by the time `first` resolves, B's own abandoned
+        // cleanup may genuinely still be in flight on a now-committed (and,
+        // pre-fix, possibly already handed to the interloper and corrupted)
+        // connection — waiting here just avoids tearing the pool down out
+        // from under it.
+        await Promise.allSettled([bPendingNext, bTeardown])
 
-      // Not asserted on: by the time `first` resolves, B's own abandoned
-      // cleanup may genuinely still be in flight on a now-committed (and,
-      // pre-fix, possibly already handed to the interloper and corrupted)
-      // connection — waiting here just avoids tearing the pool down out
-      // from under it.
-      await Promise.allSettled([bPendingNext, bTeardown])
-
-      const row = await solo(overlapTable).where('label', 'interloper-commit').first()
-      expect(row).toBeDefined()
-
-      // Clean up: the savepoint-cascade test below asserts an exact row
-      // count on this same fixture table.
-      await solo(overlapTable).where('label', 'interloper-commit').del()
-
-      await solo.destroy()
+        const row = await solo(overlapTable).where('label', 'interloper-commit').first()
+        expect(row).toBeDefined()
+      } finally {
+        await solo(overlapTable).where('label', 'interloper-commit').del()
+        await solo.destroy()
+      }
     })
 
     // Proves stream() genuinely paginates through a server-side cursor
@@ -574,6 +579,91 @@ if (process.env.POSTGRES_URL) {
       // would have surfaced as a rejection rather than a clean commit.
       const count = await db(overlapTable).count('* as count').first()
       expect(Number((count as { count: number }).count)).toBe(600)
+    })
+
+    // End to end through real db.transaction(), covering the failure-path
+    // sibling scenario the previous test deliberately excludes: sibling B's
+    // savepoint is created before sibling A's cursor, B then fails, and its
+    // `ROLLBACK TO SAVEPOINT` cascades onto A exactly as documented in
+    // src/adapters/pg.ts's `stream()` comment. Both resulting errors are
+    // caught inside the callback, so it returns normally — the same as a
+    // caller who only checked "did my transaction reject" and saw no. The
+    // outer `COMMIT` this method issues on the caller's behalf is what must
+    // now surface a typed rejection instead of a silent, lossy success.
+    //
+    // Driven through `adapter.stream()` directly against the transaction's
+    // own connection, not `trx(t).stream()` — same reason as the
+    // premature-release test above: knex's Transform drains the adapter's
+    // generator eagerly, in the background, independent of this test's own
+    // `.next()` calls. With sibling A given only a couple of rows, that
+    // eagerness lets A's own generator race to natural completion (and
+    // voluntarily close its own cursor) before B ever fails, closing the
+    // window this test exists to hit. Direct, consumer-paced iteration
+    // leaves A's cursor genuinely open until this test asks for its next
+    // row. Own table, dropped in this test's own `finally`, so a failure
+    // here can't leak a row into the count-based assertion above.
+    test('db.transaction() rejects instead of silently committing nothing when a sibling stream cascade aborts it', async () => {
+      const adapter = createPgAdapter({ url })
+      const lossTable = `cf_knex_stream_commit_loss_${Math.random().toString(36).slice(2, 10)}`
+      try {
+        await db.schema.createTable(lossTable, (t) => {
+          t.increments('id')
+          t.string('label')
+          t.integer('value')
+        })
+        // 101 'b-%' rows, not 2: FETCH_BATCH_SIZE is 100 (src/adapters/pg.ts),
+        // and a batch that fails loses every row in it, not just the
+        // offending one — the poison row needs to be alone in a *second*
+        // batch so the first `.next()` on B genuinely succeeds and creates
+        // its savepoint before A's, rather than the whole first batch
+        // (b-0 included) failing before either savepoint exists.
+        await db(lossTable).insert([
+          { label: 'a-0', value: 1 },
+          ...Array.from({ length: 100 }, (_, i) => ({ label: `b-${i}`, value: 1 })),
+          { label: 'b-100', value: 0 },
+        ])
+
+        let caught: unknown
+        await db
+          .transaction(async (trx) => {
+            const handle = await (
+              trx.client as unknown as { acquireConnection: () => Promise<unknown> }
+            ).acquireConnection()
+
+            // Real, uncontested work with nothing to do with either stream
+            // — this is what must not silently vanish.
+            await trx(lossTable).insert({ label: 'proof-of-work', value: 1 })
+
+            const iterB = adapter.stream!(
+              handle,
+              `select label, 1 / value as ratio from ${lossTable} where label like $1 order by id`,
+              ['b-%']
+            )[Symbol.asyncIterator]()
+            await iterB.next() // b-0: B's savepoint, created first, succeeds
+
+            const iterA = adapter.stream!(
+              handle,
+              `select id from ${lossTable} where label like $1 order by id`,
+              ['a-%']
+            )[Symbol.asyncIterator]()
+            await iterA.next() // a-0: A's savepoint, created second, succeeds
+
+            for (let i = 1; i < 100; i++) await iterB.next() // rest of batch 1
+            await expect(iterB.next()).rejects.toThrow() // b-100: divides by zero
+            await expect(iterA.next()).rejects.toThrow() // cursor cascaded away
+          })
+          .catch((err) => {
+            caught = err
+          })
+
+        expect(caught).toBeInstanceOf(CfKnexError)
+        expect((caught as CfKnexError).code).toBe('COMMIT_SILENTLY_ROLLED_BACK')
+
+        const proof = await db(lossTable).where('label', 'proof-of-work').first()
+        expect(proof).toBeFalsy()
+      } finally {
+        await db.schema.dropTableIfExists(lossTable)
+      }
     })
   })
 } else {

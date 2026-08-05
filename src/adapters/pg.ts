@@ -311,7 +311,7 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // and `stream()`'s own early-exit branch below already treats its cleanup
   // as best-effort for exactly this reason.
   //
-  // Not cleared by `release()`/`destroy()` below — a handle that reaches
+  // Not *relied on* being cleared by `release()`/`destroy()` below — a handle that reaches
   // either of those while still present here would leak its entry forever,
   // holding a strong reference to an ended `Client`. Harmless in practice
   // (this generator's own `finally` always runs and always removes its
@@ -427,10 +427,25 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // existence — see the `Map`'s own comment for why a plain `Set` was
     // wrong for the case of two overlapping `stream()` calls on one handle.)
 
+    // A `COMMIT` against a connection whose transaction postgres has already
+    // aborted for some other reason does not error — the database silently
+    // executes it as a `ROLLBACK` instead, so a caller who only checked "did
+    // my `db.transaction()` call reject" has no way to know their work was
+    // dropped (see `stream()`'s sibling-failure comment below for the
+    // shape most likely to cause this). knex routes every caller-triggered
+    // `COMMIT` through this method; `stream()`'s own internal best-effort
+    // `COMMIT` does not, so this check has nothing to do there. This turns
+    // that silent loss into a typed error — it does not recover the work.
     async execute(handle, sql, bindings): Promise<RawResult> {
       const client = handle as PgClientShim
       const res = await client.query(sql, bindings)
-      return toRawResult(res)
+      const result = toRawResult(res)
+      if (isCommitStatement(sql) && result.command === 'ROLLBACK') {
+        throw CfKnexError.commitSilentlyRolledBack(
+          "the transaction's own work may be partially or entirely lost — check what aborted it (a failed statement earlier on this connection, most likely from an overlapping stream() sibling; see src/adapters/pg.ts's stream() comment).",
+        )
+      }
+      return result
     },
 
     // Row-by-row streaming for `db(table).stream()`, over a real server-side
@@ -559,9 +574,9 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // eventual `COMMIT` does not throw at all: postgres silently executes it
     // as a `ROLLBACK` instead (confirmed live — the `Result`'s own `command`
     // field reads `'ROLLBACK'`, not `'COMMIT'`, and a row inserted earlier in
-    // the same transaction was not persisted). A caller who thinks their
-    // transaction committed can lose real, uncontested work with no error at
-    // all.
+    // the same transaction was not persisted) — `execute()` above now turns
+    // that into a thrown, typed error instead of a silent success; it does
+    // not recover the lost work.
     //
     // Gating `ROLLBACK TO SAVEPOINT` on "no sibling stream currently open on
     // this handle" — cheap now that `handlesMidTeardown` above is a refcount
@@ -574,7 +589,11 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // sibling's own next `FETCH`, failing immediately with 25P02 instead of
     // eventually with "cursor does not exist" once something else recovers
     // the transaction. Either way the sibling's work is lost; only the
-    // error message changes. Actually protecting a sibling from a failing
+    // error message changes — and it is strictly worse in the ordering
+    // where the failing stream's savepoint is the *later* one, where keeping
+    // the statement (the shipped behavior) lets the still-open sibling
+    // finish untouched and the eventual `COMMIT` succeed for real; gating it
+    // off would lose that recovery too. Actually protecting a sibling from a failing
     // stream needs each concurrently-open stream on its own connection
     // instead of whatever connection the caller's transaction happens to be
     // on — a materially different design, out of scope here. Overlapping,
@@ -733,4 +752,13 @@ function toRawResult(res: unknown): RawResult {
     command: result.command,
     affectedRows: typeof result.rowCount === 'number' ? result.rowCount : undefined,
   }
+}
+
+// Matches only a bare `COMMIT` statement — exactly what knex's own
+// `Transaction.prototype.commit` sends, and deliberately not a `/^commit\b/i`
+// prefix test: anything else starting with "commit" is out of scope here.
+const COMMIT_STATEMENT = /^COMMIT\s*;?\s*$/i
+
+function isCommitStatement(sql: string): boolean {
+  return COMMIT_STATEMENT.test(sql)
 }

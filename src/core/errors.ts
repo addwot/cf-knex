@@ -7,6 +7,7 @@ export type CfKnexErrorCode =
   | 'UNSUPPORTED_CAPABILITY'
   | 'INCOMPATIBLE_KNEX'
   | 'MALFORMED_DRIVER_RESULT'
+  | 'COMMIT_SILENTLY_ROLLED_BACK'
 
 export class CfKnexError extends Error {
   readonly code: CfKnexErrorCode
@@ -27,5 +28,12 @@ export class CfKnexError extends Error {
 
   static malformedResult(detail: string): CfKnexError {
     return new CfKnexError('MALFORMED_DRIVER_RESULT', `driver returned a malformed result: ${detail}`)
+  }
+
+  static commitSilentlyRolledBack(detail: string): CfKnexError {
+    return new CfKnexError(
+      'COMMIT_SILENTLY_ROLLED_BACK',
+      `COMMIT did not take effect: the connection's transaction was already aborted, so the database executed this COMMIT as a ROLLBACK instead. ${detail}`,
+    )
   }
 }
