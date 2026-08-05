@@ -9,10 +9,11 @@ const caps = { streaming: true, transactions: true }
 // database configured this file would register zero tests — and vitest fails a
 // file that contains no suite ("No test suite found in file"). A missing URL
 // must read as "not run here", never as a failure, so each skip registers a
-// named placeholder alongside its warning: the reporter then shows exactly
-// which suites were skipped and why, and the file still counts as a suite.
+// named placeholder instead: the placeholder's own title, shown in the
+// "skipped" list every reporter (verbose or not) prints test names for, is
+// the signal that a suite was skipped and why — and the file still counts as
+// a suite either way.
 function skip(name: string, envVar: string) {
-  console.warn(`SKIP ${name} — ${envVar} not set`)
   test.skip(`${name} (${envVar} not set)`, () => {})
 }
 

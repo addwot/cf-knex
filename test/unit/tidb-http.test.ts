@@ -17,11 +17,12 @@ test('declares no streaming, no transactions, and dialect mysql', () => {
   expect(adapter.dialect).toBe('mysql')
   expect(adapter.driver).toBe('tidb-http')
   expect(adapter.capabilities.streaming).toBe(false)
-  // See src/adapters/tidb-http.ts for the full evidence trail: the package
-  // only exposes interactive transactions through a dedicated `begin()` ->
-  // `Tx` object (node_modules/@tidbcloud/serverless/dist/index.d.ts), never
-  // through the generic `execute()` this adapter is restricted to, so
-  // routing knex's BEGIN/COMMIT/ROLLBACK through `execute()` cannot work.
+  // See src/adapters/tidb-http.ts's doc comment for the full evidence trail:
+  // routing BEGIN/COMMIT/ROLLBACK through this adapter's `execute()` is
+  // mechanically reachable (verified against a stub HTTP transport), but
+  // `false` here because that has not been verified against a live TiDB
+  // Cloud gateway, and an unverified `true` risks a `db.transaction()` that
+  // silently commits a rollback -- the worst failure mode this contract has.
   expect(adapter.capabilities.transactions).toBe(false)
 })
 
@@ -123,7 +124,16 @@ test('acquire() loads @tidbcloud/serverless and returns a usable handle inside w
   }
 })
 
-test('acquire() returns the same shared handle on every call', async () => {
+test('acquire() returns a fresh handle on every call, never a shared one (regression)', async () => {
+  // Regression coverage: an earlier draft of this adapter cached and shared
+  // one `Connection` across every `acquire()` call, on the mistaken premise
+  // that doing so was required for `capabilities.transactions: false` to be
+  // safe. It's the reverse — sharing one handle across callers is exactly
+  // what would make routing BEGIN/COMMIT/ROLLBACK through this adapter
+  // unsafe, since knex's `db.transaction()` holds whichever handle
+  // `acquire()` gives it for the transaction's whole lifetime and expects no
+  // other caller to touch that same handle meanwhile. See
+  // src/adapters/tidb-http.ts's doc comment for the full evidence trail.
   const originalFetch = globalThis.fetch
   globalThis.fetch = vi.fn(async () => ({
     ok: true,
@@ -138,11 +148,38 @@ test('acquire() returns the same shared handle on every call', async () => {
     const adapter = createTidbHttpAdapter({ url: 'mysql://u:p@x.tidbcloud.com:4000/db' })
     const first = await adapter.acquire()
     const second = await adapter.acquire()
-    expect(second).toBe(first)
+    expect(second).not.toBe(first)
     await adapter.destroy()
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('throws CfKnexError.malformedResult when lastInsertId is not a numeric string', async () => {
+  const execute = vi.fn().mockResolvedValue({ rows: [], rowsAffected: 1, lastInsertId: 'oops' })
+  const adapter = createTidbHttpAdapter({ url: 'mysql://u:p@x.tidbcloud.com:4000/db' })
+
+  await expect(adapter.execute({ execute }, 'insert into t values (1)', [])).rejects.toMatchObject({
+    code: 'MALFORMED_DRIVER_RESULT',
+  })
+})
+
+test('throws CfKnexError.malformedResult when lastInsertId is an empty string, rather than silently returning 0n', async () => {
+  const execute = vi.fn().mockResolvedValue({ rows: [], rowsAffected: 1, lastInsertId: '' })
+  const adapter = createTidbHttpAdapter({ url: 'mysql://u:p@x.tidbcloud.com:4000/db' })
+
+  await expect(adapter.execute({ execute }, 'insert into t values (1)', [])).rejects.toMatchObject({
+    code: 'MALFORMED_DRIVER_RESULT',
+  })
+})
+
+test('throws CfKnexError.malformedResult when rowsAffected is a string instead of a number', async () => {
+  const execute = vi.fn().mockResolvedValue({ rows: [], rowsAffected: '3', lastInsertId: null })
+  const adapter = createTidbHttpAdapter({ url: 'mysql://u:p@x.tidbcloud.com:4000/db' })
+
+  await expect(adapter.execute({ execute }, 'update t set x = 1', [])).rejects.toMatchObject({
+    code: 'MALFORMED_DRIVER_RESULT',
+  })
 })
 
 test('release() resolves without throwing (a no-op is "closing" a stateless HTTP handle)', async () => {

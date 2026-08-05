@@ -21,83 +21,89 @@ type TidbConnection = {
 
 export type TidbHttpAdapterOptions = { url: string }
 
+/**
+ * A `DriverAdapter` over `@tidbcloud/serverless` 0.3.0's HTTP driver for TiDB
+ * Cloud Serverless.
+ *
+ * ## Streaming
+ * `capabilities.streaming` is `false`: `Connection.execute()`
+ * (dist/index.js's `postQuery`) always `await`s `response.json()` in full
+ * before returning — the package exposes no cursor or chunked-read API for
+ * `DriverAdapter.stream()` to wrap.
+ *
+ * ## Transactions
+ * `capabilities.transactions` is `false` below, but *not* because the
+ * package makes BEGIN/COMMIT/ROLLBACK unreachable through this adapter's
+ * plain `execute(sql, bindings)` surface — it doesn't. Read directly from
+ * `node_modules/@tidbcloud/serverless/dist/index.js` (0.3.0): every
+ * `Connection.execute()` call reads a private `this.session` field, sends it
+ * as the `TiDB-Session` HTTP header, and overwrites it from the response
+ * afterward — on *any* `Connection` instance, not only ones reached through
+ * `conn.begin()`. `begin()` itself does nothing beyond that: it constructs a
+ * new `Connection` and calls `execute("BEGIN")` on it (lines 305-310), and
+ * `Tx.commit()`/`Tx.rollback()` are just `execute("COMMIT")`/
+ * `execute("ROLLBACK")` on that same instance (lines 271-276) — no special
+ * request field marks them as transactional beyond the session header every
+ * `execute()` call already carries. A probe against a stub HTTP transport
+ * (logging every outgoing request) confirmed this directly: `conn.begin()`
+ * -> `tx.execute()` -> `tx.commit()` and three plain
+ * `conn.execute("BEGIN"/…/"COMMIT")` calls issued on ONE `Connection`
+ * produce byte-identical requests, save for a random per-request trace id.
+ * Since `acquire()` below now hands out a fresh `Connection` per call (never
+ * shared — see its own comment) and a knex transaction holds whichever
+ * handle it receives for its entire lifetime, routing knex's
+ * BEGIN/COMMIT/ROLLBACK through this adapter's ordinary `execute()` calls on
+ * that one handle is mechanically the same request sequence the package's
+ * own `begin()`/`Tx` path produces.
+ *
+ * What that probe does not establish is whether TiDB Cloud Serverless's real
+ * gateway honors that session-affinity header as a genuinely isolated
+ * transaction end to end — it was checked against a stub transport, not a
+ * live TiDB Cloud endpoint, and there is no TiDB Cloud account available to
+ * verify it against from here. `capabilities.transactions` stays `false`
+ * until that verification happens against a live gateway (this project's
+ * conformance suite, run against a real connection, is exactly what that
+ * verification would be). The cost of guessing wrong in the `true` direction
+ * is the worst failure mode this package's contract has: a `db.transaction()`
+ * that looks like it works and silently commits a rollback. A `false` here
+ * instead produces a typed `CfKnexError`, and flipping this to `true` once
+ * verified against a live gateway is a one-line change.
+ */
 export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapter {
-  // A single connection, created lazily on first `acquire()` and returned
-  // for every subsequent call, rather than a fresh one per call (contrast
-  // src/adapters/mysql2.ts, which opens a brand-new TCP connection on every
-  // `acquire()`). That is safe here specifically because this adapter
-  // declares `capabilities.transactions: false` below and never routes a
-  // multi-statement session through `execute()` — every call this adapter
-  // makes is a one-shot, independently auto-committing HTTP request, so
-  // there is no in-flight multi-step operation two concurrent callers could
-  // corrupt by sharing this object. (The package's `Connection` class does
-  // thread an HTTP session-affinity header, `this.session`, across calls
-  // made on the *same* instance — see the `capabilities` comment below for
-  // why that is exactly what makes ad-hoc BEGIN/COMMIT/ROLLBACK unsafe to
-  // rely on, and exactly why this adapter never attempts it.) There is also
-  // no socket or file descriptor to exhaust by keeping this around: an HTTP
-  // client object like this one costs nothing to hold, unlike a pooled TCP
-  // connection.
-  let conn: TidbConnection | null = null
-
   return {
     dialect: 'mysql',
     driver: 'tidb-http',
-    capabilities: {
-      streaming: false,
-      // Verified against node_modules/@tidbcloud/serverless/dist/index.d.ts
-      // and dist/index.js (package version 0.3.0), not copied from a plan.
-      // The package documents three usage modes (README.md): a "stateless"
-      // default where `Connection.execute()` auto-commits every statement
-      // independently, and two opt-in modes reached only through their own
-      // dedicated APIs — `conn.persist()` -> `StatefulConnection`, and
-      // `conn.begin()` -> `Tx` with named `commit()`/`rollback()` methods
-      // (index.d.ts lines 100-118). `Tx.commit`/`Tx.rollback` are themselves
-      // just `this.conn.execute("COMMIT"|"ROLLBACK")` (index.js lines
-      // 271-276) on a *second*, separate `Connection` instance that
-      // `begin()` constructs specifically for the transaction (index.js
-      // lines 305-310) — never on the connection object a caller already
-      // holds. `DriverAdapter.execute(handle, sql, bindings)` (../core/
-      // types.ts) can only reach `handle.execute(sql, bindings, opts)`; it
-      // has no way to call `handle.begin()` or hand knex a `Tx` object mid-
-      // stream, and knex sends BEGIN/COMMIT/ROLLBACK as plain SQL text
-      // through that exact same generic path as every other query. Because
-      // this adapter also shares one `Connection` instance across every
-      // `acquire()` call (see above), even the fallback idea of issuing raw
-      // "BEGIN"/"COMMIT" through plain `execute()` calls on the assumption
-      // that the connection's own session-affinity header would thread them
-      // together is unsound: two logically-unrelated callers would be
-      // mutating that same instance's one `this.session` field concurrently,
-      // so a rollback could land on a session a completely different query
-      // reassigned in the meantime — silently committing the wrong thing
-      // rather than rolling back. There is no path from this adapter's
-      // `execute()`-only surface to the package's real transaction API, so
-      // this is `false`, not the `true` an earlier draft assumed.
-      transactions: false,
-    },
+    capabilities: { streaming: false, transactions: false },
 
     async acquire(): Promise<TidbConnection> {
-      if (conn) return conn
       let serverless: typeof import('@tidbcloud/serverless')
       try {
         serverless = await import('@tidbcloud/serverless')
       } catch {
         throw CfKnexError.missingDriver('@tidbcloud/serverless')
       }
-      // `fetch` is the ambient global, resolved at call time — this is what
-      // lets a test stub `globalThis.fetch` before calling `acquire()` (see
-      // test/unit/tidb-http.test.ts) and is also what makes this adapter
-      // work unmodified inside a Workers isolate, where `fetch` is already
-      // the platform's own implementation.
-      conn = serverless.connect({ url: opts.url, fetch }) as unknown as TidbConnection
-      return conn
+      // A brand-new `Connection` on every call — never one cached and shared
+      // (contrast an earlier draft of this adapter, which shared one
+      // instance and used that sharing as its reason not to attempt
+      // transactions; see this function's doc comment for why that reasoning
+      // didn't hold up). `createKnexClient` wires this into knex's
+      // `acquireRawConnection()`, which tarn calls only when it needs an
+      // additional pooled resource, and `db.transaction()` holds whichever
+      // handle it receives for its entire lifetime. Handing the same
+      // `Connection` to two callers would let an unrelated query share
+      // whatever session state that instance's `this.session` field
+      // currently holds — including, if a transaction were ever routed
+      // through it, landing mid-transaction. `connect()` is a pure
+      // constructor with no I/O (`dist/index.js`: `function connect(config)
+      // { return new Connection(config) }`), so creating a fresh one per
+      // `acquire()` call, exactly like src/adapters/mysql2.ts does for its
+      // TCP connections, costs nothing extra.
+      return serverless.connect({ url: opts.url, fetch }) as unknown as TidbConnection
     },
 
-    // No socket, no file descriptor, no server-side session this adapter
-    // holds open — each `execute()` call above is already a complete,
-    // independent HTTP request/response. For a stateless HTTP client like
-    // this one, doing nothing here *is* closing the handle; there is
-    // nothing left to release.
+    // No socket or file descriptor to close: each `execute()` call above is
+    // a complete, independent HTTP request/response over `fetch`. For a
+    // handle like this one, doing nothing here already is closing it.
     async release(): Promise<void> {},
 
     async execute(handle, sql, bindings): Promise<RawResult> {
@@ -105,14 +111,11 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
       return toRawResult(result)
     },
 
-    // Idempotent: tolerates being called more than once (e.g. `knex.destroy()`
-    // called twice), same as ending an already-ended connection a second
-    // time is safe. Clearing the cached connection rather than latching a
-    // "destroyed" flag leaves `acquire()` free to open a new one afterward,
-    // exactly as it did before this call.
-    async destroy(): Promise<void> {
-      conn = null
-    },
+    // Nothing for this adapter to tear down beyond individual handles:
+    // unlike src/adapters/mysql2.ts, there is no adapter-level cache or
+    // bookkeeping here that outlives a single handle. Trivially idempotent,
+    // since it does nothing either time it's called.
+    async destroy(): Promise<void> {},
 
     // No `validate()` — omitted entirely, not just set to a function that
     // always returns `true`. An HTTP-backed handle like this one reopens no
@@ -136,7 +139,14 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
  * in transit — and returning `(result as any).rows ?? []` unconditionally
  * would silently turn any of those into a successful empty result set
  * instead of surfacing the failure. Guard it the same way
- * src/adapters/mysql2.ts's `toRawResult` does.
+ * src/adapters/mysql2.ts's `toRawResult` does — and, unlike that file,
+ * `lastInsertId` and `rowsAffected` need the same treatment here, not just
+ * `rows`: mysql2's equivalent numeric-string id comes from mysql2's own
+ * length-coded packet parser, a value this project doesn't control the shape
+ * of but does trust; `lastInsertId`/`rowsAffected` here come straight off
+ * untrusted JSON crossing an HTTP boundary, so `normalizeInsertId`/
+ * `normalizeAffectedRows` below reject anything that isn't the shape
+ * `FullResult` promises instead of coercing it and hoping.
  */
 function toRawResult(result: unknown): RawResult {
   // Rejects `null`, non-objects, and arrays explicitly — a bare `Row[]` (the
@@ -160,7 +170,7 @@ function toRawResult(result: unknown): RawResult {
   return {
     rows: full.rows ?? [],
     insertId: normalizeInsertId(full.lastInsertId),
-    affectedRows: full.rowsAffected ?? undefined,
+    affectedRows: normalizeAffectedRows(full.rowsAffected),
   }
 }
 
@@ -171,16 +181,44 @@ function toRawResult(result: unknown): RawResult {
  * `resp?.sLastInsertID`, never through any numeric parsing, presumably so
  * that TiDB's `AUTO_RANDOM` and 64-bit auto-increment ids — both of which
  * routinely exceed `Number.MAX_SAFE_INTEGER` — never round-trip through a
- * precision-lossy JSON/JS number first. Converting that string straight to
- * `bigint` (rather than `Number(id)`, which would silently corrupt exactly
- * the large ids this exists to protect) mirrors src/adapters/mysql2.ts's own
- * handling of mysql2's equivalent numeric-string case. The `number` branch
- * below is not reachable through the real package (its type never offers a
- * plain `number` here) — it exists only so a hand-built `RawResult`-shaped
- * mock in a test is passed through unchanged rather than needlessly widened
- * to `bigint`.
+ * precision-lossy JSON/JS number first. Converting a well-formed digit
+ * string straight to `bigint` (rather than `Number(id)`, which would
+ * silently corrupt exactly the large ids this exists to protect) mirrors
+ * src/adapters/mysql2.ts's own handling of mysql2's equivalent
+ * numeric-string case. But unlike that string, this one arrives over
+ * untrusted JSON, so it is validated first rather than handed straight to
+ * `BigInt()`: an unparseable string (`BigInt('oops')`) would otherwise throw
+ * an opaque, uncaught `SyntaxError` instead of a typed `CfKnexError`, and an
+ * empty string (`BigInt('') === 0n`) would otherwise silently masquerade as
+ * a real id of `0`. The `number` branch below is not reachable through the
+ * real package (its type never offers a plain `number` here) — it exists
+ * only so a hand-built `RawResult`-shaped mock in a test is passed through
+ * unchanged rather than needlessly widened to `bigint`.
  */
 function normalizeInsertId(id: string | number | null | undefined): bigint | number | undefined {
   if (id === null || id === undefined) return undefined
-  return typeof id === 'string' ? BigInt(id) : id
+  if (typeof id === 'number') return id
+  if (!/^\d+$/.test(id)) {
+    throw CfKnexError.malformedResult(`tidb-http lastInsertId was not a numeric string (got ${JSON.stringify(id)})`)
+  }
+  return BigInt(id)
+}
+
+/**
+ * `FullResult.rowsAffected` is typed `number | null` (dist/index.d.ts) and
+ * read straight off the raw HTTP JSON body with no validation
+ * (dist/index.js). `RawResult.affectedRows` (../core/types.ts) is typed
+ * `number`, and src/core/response.ts hands it straight to knex's own
+ * `.update()`/`.delete()` return-value handling — a string here (a
+ * malformed or truncated response, or a proxy that re-serialized the field)
+ * would pass silently through as a string where every caller expects a
+ * number, exactly the kind of unexpected-shape failure this HTTP boundary
+ * makes reachable.
+ */
+function normalizeAffectedRows(value: number | null | undefined): number | undefined {
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'number') {
+    throw CfKnexError.malformedResult(`tidb-http rowsAffected was not a number (got ${typeof value})`)
+  }
+  return value
 }
