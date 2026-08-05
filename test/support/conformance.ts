@@ -128,8 +128,14 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
         // `pool.destroy()` waiting for the transaction's connection to come
         // back) — 5+10 opaque seconds becoming the whole file reported as a
         // failed suite, with no indication why.
+        // Not `.catch()`-guarded before the race: knex builders are
+        // thenables whose `.then()`/`.catch()` each independently trigger a
+        // fresh `runner.run()` (node_modules/knex/lib/builder-interface-
+        // augmenter.js) — attaching a `.catch()` here would run this insert
+        // *twice*. It doesn't need one anyway: `Promise.race` itself attaches
+        // a handler to every input, including the one that loses, so a late
+        // rejection from the losing side is already observed, not unhandled.
         const outsideInsert = db(table).insert({ name: 'ivan-outside', score: 10 })
-        outsideInsert.catch(() => {}) // observed via the race below either way; just suppressing an unhandled-rejection warning if it loses the race and fails later.
         const starved = Symbol('pool starved')
         const raced = await Promise.race([
           outsideInsert,
@@ -143,7 +149,7 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
           // still checked out into whatever runs after it.
           await trxPromise.catch(() => {})
           throw new Error(
-            "timed out waiting for a second pooled connection — this case needs the factory's pool to allow at least 2 connections simultaneously ('pool: { max: 1 }' starves it)",
+            "timed out waiting for the concurrent insert to complete — most likely the factory's pool can't supply a second connection while the transaction above still holds the only one (needs pool: { max } >= 2; 'pool: { max: 1 }' starves it), though a fixed 2s deadline could in principle also trip on an unrelated slow/lock-blocked insert",
           )
         }
 

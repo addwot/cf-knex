@@ -145,6 +145,66 @@ test('caller-supplied knexOptions cannot break the client or the sqlite defaults
   await db.destroy()
 })
 
+test('a handle validate() marks stale is evicted and a fresh one acquired on the next query (Finding A regression)', async () => {
+  // Regression coverage for a real bug: `validateConnection` used to return
+  // `true` unconditionally, so a connection that died while sitting idle in
+  // the pool (server-side `KILL`, network drop) stayed in rotation forever
+  // and poisoned every later query. `DriverAdapter.validate` (src/core/
+  // types.ts) exists so the adapter can tell tarn a handle has gone stale;
+  // `CfKnexClient.validateConnection` (src/core/client.ts) must actually
+  // delegate to it. The fake adapter's `invalidateAfterFirstUse` flips
+  // `validate()` to `false` for any handle already used once, standing in
+  // for "this connection died between queries" without needing a real
+  // database.
+  const { adapter, acquireCount, handles, wasReleased } = createFakeAdapter({
+    dialect: 'mysql',
+    invalidateAfterFirstUse: true,
+  })
+  const db = createKnexClient(adapter)
+
+  await db('users').select('name')
+  expect(acquireCount()).toBe(1)
+
+  // The handle from the first query is now "used", so validate() will
+  // report it stale the moment tarn tries to hand it back out -- this
+  // second query must therefore evict it (release) and acquire a new one,
+  // not reuse it the way the sequential-reuse regression test above
+  // requires when nothing has gone stale.
+  await db('users').select('name')
+  expect(acquireCount()).toBe(2)
+  expect(handles.length).toBe(2)
+  expect(wasReleased(handles[0])).toBe(true)
+
+  await db.destroy()
+})
+
+test('trx.destroy() inside an open transaction does not tear down the adapter or break the parent db (Finding C regression)', async () => {
+  // Regression coverage for a real bug: `destroy()` used to call
+  // `adapter.destroy()` unconditionally, but knex's transactor client
+  // shares the real client's prototype (execution/transaction.js's
+  // `makeTxClient`), so `trx.destroy()` inside a transaction resolved to
+  // this same method and tore down every connection the adapter held --
+  // including the one the transaction itself still needed to commit,
+  // breaking the parent `db` permanently. The `this.transacting` guard in
+  // src/core/client.ts's `destroy()` exists to stop that.
+  const { adapter, destroyCount } = createFakeAdapter({ dialect: 'mysql' })
+  const db = createKnexClient(adapter)
+
+  await db.transaction(async (trx) => {
+    await trx('users').insert({ name: 'x' })
+    await trx.destroy()
+  })
+  expect(destroyCount()).toBe(0)
+
+  // The parent client must still be usable after the transactor was
+  // destroyed -- this is what "did not break the parent db" means in
+  // practice, not just that adapter.destroy() was skipped.
+  await db('users').select('name')
+
+  await db.destroy()
+  expect(destroyCount()).toBe(1)
+})
+
 test("an explicit caller pool option overrides the Workers-appropriate default (min: 0, max: 5)", async () => {
   // createKnexClient defaults to `pool: { min: 0, max: 5 }` (see the
   // `poolDefault` comment in src/core/client.ts) specifically because this

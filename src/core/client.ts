@@ -88,15 +88,17 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       await adapter.release(handle)
     }
 
-    // knex's stock mysql2 dialect implements this as
-    // `connection.connection && connection.connection.stream.readable &&
-    // !connection.connection.stream.destroyed` — it assumes the pooled
-    // handle is always a live mysql2 socket. That is not true in general:
-    // `adapter` owns the handle, and for the tidb-http/d1/libsql adapters
-    // this same class is reused for, it may not have a `.stream` at all.
-    // Reading that property on one of this project's handles would throw
-    // (not just return false), which tarn would treat as "invalid, discard
-    // immediately" — silently defeating pooling on every acquire. Handle
+    // knex's stock mysql2 dialect implements this as `connection &&
+    // !connection._fatalError && !connection._protocolError &&
+    // !connection._closing && !connection.stream.destroyed`
+    // (node_modules/knex/lib/dialects/mysql2/index.js) — it assumes the
+    // pooled handle is always a live mysql2 socket with those exact fields.
+    // That is not true in general: `adapter` owns the handle, and for the
+    // tidb-http/d1/libsql adapters this same class is reused for, it may not
+    // have any of them. Reading `.stream.destroyed` on one of those handles
+    // would throw (not just return false), which tarn would treat as
+    // "invalid, discard immediately" — silently defeating pooling on every
+    // acquire. Handle
     // liveness is genuinely the adapter's concern, not the pool's — but
     // "the adapter's concern" has to mean something the adapter can act on,
     // not just a comment here promising it does: `DriverAdapter.validate`
@@ -176,16 +178,22 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
   // one cached in a module-level global — Hyperdrive already pools
   // server-side, and reusing a cached knex/socket object across requests
   // throws workerd's "Cannot perform I/O on behalf of a different request".
-  // Under that pattern `min: 2` means every single request eagerly opens
-  // two connections even if it runs exactly one query, and they are never
-  // reclaimed: tarn's own reap arithmetic (`maxDestroy = free.length -
-  // (min - used.length)`, verified against
-  // node_modules/.pnpm/tarn@3.1.2's Pool.js `check()`) is ≤ 0 whenever at
-  // most `min` connections are sitting idle, so the idle-timeout reaper
-  // never fires on them — they just sit open until the request-scoped
-  // client itself is destroyed. `min: 0` means nothing opens until a query
-  // actually needs it; `max: 5` is a modest per-client ceiling, not a
-  // promise every adapter/database combination can sustain concurrently.
+  // tarn only ever creates connections to satisfy actual pending acquires
+  // (`_shouldCreateMoreResources`, node_modules/.pnpm/tarn@3.1.2's
+  // Pool.js), so `min: 2` does NOT mean two connections open eagerly up
+  // front — a single query against a `min: 2` pool still opens exactly one.
+  // The real problem is what happens to that one connection afterward: it
+  // is never reclaimed. tarn's reap arithmetic (`maxDestroy = free.length -
+  // (min - used.length)`, from the same `check()`) is ≤ 0 whenever at most
+  // `min` connections are sitting idle, so the idle-timeout reaper never
+  // fires on them. With a fresh client per request and `min: 2`, the one
+  // connection that request's query opened is pinned open for the rest of
+  // that client's lifetime instead of being reclaimable — exactly backwards
+  // for a client that's about to be destroyed at the end of the request
+  // anyway. `min: 0` removes that floor entirely, so an idle connection is
+  // always eligible for reaping; `max: 5` is a modest per-client ceiling,
+  // not a promise every adapter/database combination can sustain
+  // concurrently.
   const poolDefault: Record<string, unknown> = { pool: { min: 0, max: 5 } }
 
   // `client` must always be `CfKnexClient` (a caller-supplied one would

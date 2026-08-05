@@ -153,11 +153,24 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
       open.add(conn)
       // `PromiseConnection` (this adapter's handle type) re-emits the raw
       // connection's 'error' event, and Node's EventEmitter throws on an
-      // unhandled 'error' event by default — without a listener here, a
-      // connection that drops while idle in the pool (server restart,
-      // `KILL`, network blip) would crash the whole process, not just fail
-      // its next query. Listening also marks the handle dead for `validate()`
-      // below, so the pool discards it instead of handing it back out.
+      // unhandled 'error' event by default — but mysql2/promise's own
+      // `createConnectionPromise` (mysql2/promise.js) already leaves a
+      // `once('error', reject)` listener on the *raw* connection after
+      // `createConnection` resolves (it's only removed once it actually
+      // fires, not once the connection succeeds), so the very first
+      // post-connect 'error' event alone would not crash the process even
+      // without this listener — verified: `rawConnection.listenerCount
+      // ('error') === 1` immediately after `createConnection`, with no
+      // adapter listener attached yet. What that leftover listener doesn't
+      // cover is the *second* 'error' event on the same connection: once
+      // the built-in `once` fires, it removes itself, and any further
+      // 'error' event on an idle pooled connection (network blip after a
+      // first blip, a second server-side `KILL` attempt, etc) would then be
+      // genuinely unhandled. This listener — a persistent `.on()`, not a
+      // one-shot `.once()` — is what actually guards that case, for as long
+      // as the connection lives. It also marks the handle dead for
+      // `validate()` below, so the pool discards it instead of handing it
+      // back out.
       ;(conn as unknown as Mysql2ConnectionShim).on('error', () => dead.add(conn))
       return conn
     },

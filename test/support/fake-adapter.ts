@@ -1,6 +1,21 @@
 import type { Dialect, DriverAdapter, RawResult } from '../../src/core/types'
 
-export function createFakeAdapter(opts: { dialect: Dialect; result?: Partial<RawResult> }) {
+export function createFakeAdapter(opts: {
+  dialect: Dialect
+  result?: Partial<RawResult>
+  // Opts a fake handle into going "stale" the moment it's used once, so a
+  // test can exercise the pool-eviction path `DriverAdapter.validate` exists
+  // for (src/core/types.ts) without a real database: tarn calls `validate`
+  // before handing a pooled handle back out, so a query run against a
+  // handle this flipped stale should force a fresh `acquire()` instead of
+  // reusing it. Omitted entirely (not just `undefined`) unless this is set,
+  // matching every other fake adapter in this file — a `DriverAdapter`
+  // without `validate` at all is "always valid", the default every adapter
+  // that can't go stale (tidb-http, d1) actually needs; adding it always,
+  // even as a no-op true, would stop that default path from being the one
+  // every other test in this suite exercises.
+  invalidateAfterFirstUse?: boolean
+}) {
   const calls: Array<{ sql: string; bindings: unknown[] }> = []
   // `createKnexClient` (src/core/client.ts) wires `acquire`/`release`/
   // `destroy` into knex's real tarn pool now, rather than calling into them
@@ -13,6 +28,7 @@ export function createFakeAdapter(opts: { dialect: Dialect; result?: Partial<Raw
   let destroyCount = 0
   const released = new Set<unknown>()
   const handles: object[] = []
+  const usedOnce = new Set<unknown>()
   const adapter: DriverAdapter = {
     dialect: opts.dialect,
     driver: 'mysql2',
@@ -26,13 +42,17 @@ export function createFakeAdapter(opts: { dialect: Dialect; result?: Partial<Raw
     release: async (handle) => {
       released.add(handle)
     },
-    execute: async (_h, sql, bindings) => {
+    execute: async (h, sql, bindings) => {
       calls.push({ sql, bindings })
+      usedOnce.add(h)
       return { rows: [], ...opts.result } as RawResult
     },
     destroy: async () => {
       destroyCount++
     },
+  }
+  if (opts.invalidateAfterFirstUse) {
+    adapter.validate = (handle: unknown) => !usedOnce.has(handle)
   }
   return {
     adapter,
