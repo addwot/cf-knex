@@ -43,12 +43,23 @@ const DEFAULT_LOG = {
   deprecate: (message: string) => console.warn(message),
 }
 
+// `loadDialect` deliberately types the base dialect class's instance as
+// `unknown` — this file otherwise never calls an inherited member by name,
+// so there is nothing to type-check against. `destroy()` below is the one
+// exception: it calls `super.destroy()` to reuse knex's own pool-teardown
+// sequence, so the instance type is refined with just that one member typed
+// (an intersection keeps every other inherited member available as
+// `unknown`, same as before).
+type KnexClientInstance = Record<string, unknown> & {
+  destroy(callback?: (err?: unknown) => void): Promise<void>
+}
+
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- mirrors knex's own public `Knex<TRecord, TResult>` signature (node_modules/knex/types/index.d.ts); widening it would diverge from knex's generics and break `.select()`/`.selec()` type-checking.
 export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
   adapter: DriverAdapter,
   knexOptions: Record<string, unknown> = {},
 ): KnexType<TRecord, TResult> {
-  const Base = loadDialect(adapter.dialect) as new (...args: never[]) => Record<string, unknown>
+  const Base = loadDialect(adapter.dialect) as new (...args: never[]) => KnexClientInstance
 
   class CfKnexClient extends Base {
     // knex's base Client constructor calls this whenever `config.connection`
@@ -58,12 +69,40 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // Nothing below reads `this.driver`, so no-opping this is safe.
     initializeDriver() {}
 
-    async acquireConnection() {
+    // Deliberately NOT overriding `acquireConnection` / `releaseConnection`
+    // (knex's higher-level, per-query API): the base `Client` implementation
+    // of those two calls `this.pool.acquire()` / `this.pool.release()`,
+    // which is exactly what makes knex's tarn pool real. Overriding them
+    // directly — this project's first attempt — calls straight into
+    // `adapter` once per query and bypasses tarn entirely, so the pool
+    // never tracks a handle and never reaps it; see `DriverAdapter`'s doc
+    // comment in ./types.ts for the fallout that caused. Overriding the
+    // lower-level hooks below instead lets tarn own pooling and only calls
+    // into `adapter` when tarn itself decides to create or evict a handle.
+
+    async acquireRawConnection() {
       return adapter.acquire()
     }
 
-    async releaseConnection(handle: unknown) {
+    async destroyRawConnection(handle: unknown) {
       await adapter.release(handle)
+    }
+
+    // knex's stock mysql2 dialect implements this as
+    // `connection.connection && connection.connection.stream.readable &&
+    // !connection.connection.stream.destroyed` — it assumes the pooled
+    // handle is always a live mysql2 socket. That is not true in general:
+    // `adapter` owns the handle, and for the tidb-http/d1/libsql adapters
+    // this same class is reused for, it may not have a `.stream` at all.
+    // Reading that property on one of this project's handles would throw
+    // (not just return false), which tarn would treat as "invalid, discard
+    // immediately" — silently defeating pooling on every acquire. Handle
+    // liveness is the adapter's concern, not the pool's; always reporting
+    // valid here and letting `execute()` surface a real connection failure
+    // as a query error is the correct default until an adapter needs
+    // otherwise.
+    validateConnection(): boolean {
+      return true
     }
 
     async _query(handle: unknown, obj: Record<string, unknown>) {
@@ -73,6 +112,29 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
 
     _stream() {
       throw CfKnexError.unsupported(adapter.driver, 'streaming', 'Use .limit()/.offset() to paginate.')
+    }
+
+    // knex's own `Client.destroy()` only tears down the pool — which, now
+    // that acquire/destroy are wired to real tarn hooks above, does mean
+    // every handle tarn still holds gets a `destroyRawConnection` /
+    // `adapter.release()` call. But `Client.destroy()` has no notion of
+    // `adapter`, so without this override `knex.destroy()` would never
+    // reach `adapter.destroy()` and any adapter-level state that outlives
+    // individual handles (e.g. src/adapters/mysql2.ts's own bookkeeping)
+    // would go untorn-down. `knex.destroy(callback)` (make-knex.js) calls
+    // `this.client.destroy(callback)` directly and polymorphically, so
+    // overriding `destroy` here is reached the same way the overrides above
+    // are. `super.destroy()` first reuses the base pool-teardown sequence
+    // (including its own `_ownsPool` guard) before `adapter.destroy()` runs.
+    async destroy(callback?: (err?: unknown) => void): Promise<void> {
+      try {
+        await super.destroy()
+        await adapter.destroy()
+        if (typeof callback === 'function') callback()
+      } catch (err) {
+        if (typeof callback === 'function') return callback(err)
+        throw err
+      }
     }
   }
 

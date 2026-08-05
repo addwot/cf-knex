@@ -78,6 +78,46 @@ test('_stream() throws CfKnexError with code UNSUPPORTED_CAPABILITY', () => {
   }
 })
 
+test('sequential queries reuse a pooled connection instead of acquiring one per query (regression)', async () => {
+  // Regression coverage for the original bug: `createKnexClient` used to
+  // override knex's higher-level `acquireConnection`/`releaseConnection`
+  // directly, calling into `adapter.acquire()` on every single query and
+  // never returning anything to knex's own pool (tarn). Overriding the
+  // lower-level `acquireRawConnection`/`destroyRawConnection`/
+  // `validateConnection` hooks instead (src/core/client.ts) lets tarn
+  // genuinely pool the handle `adapter.acquire()` hands out — five
+  // sequential, fully-awaited queries against one idle-then-reused
+  // connection should call `adapter.acquire()` once, not five times.
+  const { adapter, acquireCount } = createFakeAdapter({ dialect: 'mysql' })
+  const db = createKnexClient(adapter)
+  for (let i = 0; i < 5; i++) {
+    await db('users').where('id', i).select('name')
+  }
+  expect(acquireCount()).toBe(1)
+  await db.destroy()
+})
+
+test('knex.destroy() releases every pooled connection and reaches adapter.destroy() (regression)', async () => {
+  // Regression coverage for the second half of the same bug: `adapter.destroy()`
+  // used to be unreachable from the public API (`CfKnexClient` never
+  // overrode `destroy()`, and knex's own `Client.destroy()` only tears down
+  // the pool, which it never actually held anything in). This asserts both
+  // halves of the fix: every handle the pool acquired gets released (closed)
+  // during pool teardown, and the adapter's own `destroy()` still runs
+  // afterward for state that outlives any single handle.
+  const { adapter, handles, wasReleased, destroyCount } = createFakeAdapter({ dialect: 'mysql' })
+  const db = createKnexClient(adapter)
+  await db('users').select('name')
+  expect(handles.length).toBeGreaterThan(0)
+
+  await db.destroy()
+
+  for (const handle of handles) {
+    expect(wasReleased(handle)).toBe(true)
+  }
+  expect(destroyCount()).toBe(1)
+})
+
 test('caller-supplied knexOptions cannot break the client or the sqlite defaults (precedence regression)', async () => {
   // `connection` must merge with, not replace, the sqlite defaults --
   // omitting `filename` here would otherwise reintroduce the
