@@ -631,10 +631,10 @@ test('sqlite: a Date binding reaches execute() as its epoch-ms number, and a boo
 })
 
 test('sqlite: db.raw() bindings are normalized the same way as the query builder (the fix must not miss db.raw())', async () => {
-  // `prepBindings` is knex's own hook, called from lib/raw.js as well as the
-  // query compiler -- `_query()` (src/core/client.ts) is this project's own
-  // method and is only ever reached through the query-builder/runner path,
-  // so hooking that instead would silently miss this case.
+  // `prepBindings` is knex's own hook, reached from lib/raw.js by a different
+  // route than the query compiler uses, so covering only the builder above
+  // would leave this route untested even though both end in the same
+  // `execute()`.
   const { adapter, calls } = createFakeAdapter({ dialect: 'sqlite' })
   const db = createKnexClient(adapter)
   const when = new Date(1577934245000)

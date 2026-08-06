@@ -234,15 +234,19 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       return adapter.validate ? adapter.validate(handle) : true
     }
 
-    // knex's own hook (node_modules/knex/lib/client.js's base `Client`), not
-    // this project's `_query()` below — every query-issuing path routes
-    // bindings through it first: the query builder (lib/query/querycompiler.js),
-    // `db.raw(...)` (lib/raw.js), and the execution runner (lib/execution/
-    // internal/query-executioner.js) all call `client.prepBindings(...)`
-    // before `_query()` ever sees the result. Hooking `_query()` instead
-    // would miss `db.raw()` entirely, since raw queries reach `prepBindings`
-    // through a separate call site that never goes through `_query()`'s
-    // caller.
+    // knex's own hook (node_modules/knex/lib/client.js's base `Client`),
+    // deliberately rather than this project's `_query()` below. Converting
+    // in `_query()` would reach every query that runs today — `db.raw()`
+    // included, since `client.query()` calls `enrichQueryObject()` (which
+    // calls `prepBindings`) and then `_query()` — but it would convert too
+    // late to be seen anywhere else, and not at all on paths that skip
+    // `_query()`. `prepBindings` runs before the `query` event is emitted
+    // and before a failed query's SQL is interpolated into its error
+    // message, so both report the values actually sent; and
+    // `client.stream()` reaches `enrichQueryObject()` then `_stream()`,
+    // never `_query()`, so a sqlite-family adapter that ever declares
+    // `capabilities.streaming` gets this for free (both do declare `false`
+    // today, so that half is not yet reachable).
     //
     // sqlite-only, and only `Date`/boolean: the base `Client.prepBindings`
     // is a plain passthrough, and knex's own sqlite3 dialect never overrides
@@ -257,6 +261,11 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // every other dialect falls straight through to the base passthrough.
     prepBindings(bindings: unknown[]): unknown[] {
       if (adapter.dialect !== 'sqlite') return super.prepBindings(bindings)
+      // Carried over verbatim from `_formatBindings`. No knex path this
+      // project exercises reaches here with anything but an array — proven
+      // by throwing on a non-array here and running the whole suite, which
+      // stayed green — so it is unreachable today rather than a guard some
+      // test covers.
       if (!bindings) return []
       return bindings.map((binding) => {
         if (binding instanceof Date) return binding.valueOf()
