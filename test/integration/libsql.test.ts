@@ -184,6 +184,7 @@ if (process.env.LIBSQL_URL) {
   runConformanceSuite('libsql (Turso / libsql-server, HTTP)', () => createKnexClient(createLibsqlAdapter({ url })), {
     streaming: false,
     transactions: true,
+    singleWriter: true,
   })
   runLibsqlTransactionTests('libsql-server, docker', { url })
 
@@ -240,6 +241,7 @@ if (process.env.TURSO_URL && process.env.TURSO_AUTH_TOKEN) {
   runConformanceSuite('libsql (Turso, live)', () => createKnexClient(createLibsqlAdapter({ url, authToken })), {
     streaming: false,
     transactions: true,
+    singleWriter: true,
   })
   runLibsqlTransactionTests('Turso, live', { url, authToken })
 } else {
