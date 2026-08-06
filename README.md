@@ -19,17 +19,11 @@ export default {
 
 I wanted to use TiDB Cloud Serverless from a Cloudflare Worker with Knex.js, and could not.
 
-Worth separating up front, because it decides which entry point you want: **self-hosted
-TiDB and TiDB Dedicated speak the MySQL wire protocol**, so they are a MySQL backend here
-— `mysql2` through Hyperdrive, same as any other MySQL server. **TiDB Cloud Serverless is
-the one that is different**, because it also exposes an HTTP API, and that API is the only
-way to reach it from a Worker at all: Hyperdrive refuses that tier at config-creation time
-(see [Driver inference](#driver-inference)), so there is no TCP path to fall back to.
-
-The first problem was that a Worker has no TCP sockets, so `mysql2` is not an option
-without putting Hyperdrive in front of the database. TiDB Cloud ships an HTTP driver for
-exactly this situation — `@tidbcloud/serverless` — but Knex.js has no dialect for it, so the
-query builder and the driver had no way to meet.
+A Worker has no TCP sockets, so `mysql2` is out unless Hyperdrive sits in front — and
+Hyperdrive [refuses that tier](#driver-inference) at config-creation time, so there is no
+TCP path to fall back to. TiDB Cloud ships an HTTP driver for exactly this situation,
+`@tidbcloud/serverless`, but Knex.js has no dialect for it, so the query builder and the
+driver had no way to meet.
 
 The second problem is worse, and it is nothing to do with TiDB: **stock Knex.js does not
 build for a Worker at all.** `import Knex from 'knex'` reaches `knex/lib/dialects/index.js`, a
@@ -42,16 +36,15 @@ neutralises only the *bare* specifiers — the mariadb dialect asks for the subp
 ✘ [ERROR] Could not resolve "mariadb/callback"
 ```
 
-So this started as a TiDB-Serverless-over-HTTP wrapper and grew into the general answer. cf-knex
-never imports Knex.js's main entry. It builds on Knex.js's dialect classes directly and
+So cf-knex never imports Knex.js's main entry. It builds on Knex.js's dialect classes
+directly — the query builder, schema builder and transactions are Knex.js's own — and
 supplies its own connection layer per backend, so every entry point bundles under a real
 `wrangler deploy` with no `alias` entries in your `wrangler.jsonc`. That claim is a CI
 gate, not a promise: every push packs the published tarball, installs it into a throwaway
 project with real wrangler, and runs `wrangler deploy --dry-run` for all six entry points.
 
 Once the plumbing existed for TiDB Serverless, the other four backends were the same
-shape of work, so they are here too. You still get Knex.js — the query builder, schema builder, and
-transactions are Knex.js's own.
+shape of work, so they are here too.
 
 ## Install
 
@@ -108,8 +101,9 @@ adapter; importing `cf-knex/tidb` does not bundle the Postgres or MySQL code.
 
 ## Examples
 
-Each block is a complete Worker. `db.destroy()` at the end of the request is deliberate —
-see [Lifetime](#lifetime).
+The first block is a complete Worker; the rest show only what differs, inside the same
+`fetch` handler and the same `try`/`finally`. `db.destroy()` at the end of the request is
+deliberate — see [Lifetime](#lifetime).
 
 ### TiDB Cloud Serverless over HTTP
 
@@ -143,16 +137,8 @@ HTTP".
 ```ts
 import { createClient } from 'cf-knex/d1'
 
-export default {
-  async fetch(req: Request, env: { DB: D1Database }) {
-    const db = createClient({ binding: env.DB })
-    try {
-      return Response.json(await db('posts').orderBy('id', 'desc').limit(10))
-    } finally {
-      await db.destroy()
-    }
-  },
-}
+const db = createClient({ binding: env.DB })          // env: { DB: D1Database }
+await db('posts').orderBy('id', 'desc').limit(10)
 ```
 
 ### Turso (libsql)
@@ -160,17 +146,8 @@ export default {
 ```ts
 import { createClient } from 'cf-knex/turso'
 
-export default {
-  async fetch(req: Request, env: { TURSO_URL: string; TURSO_AUTH_TOKEN: string }) {
-    const db = createClient({ url: env.TURSO_URL, authToken: env.TURSO_AUTH_TOKEN })
-    try {
-      const [id] = await db('posts').insert({ title: 'hello' })
-      return Response.json({ id })
-    } finally {
-      await db.destroy()
-    }
-  },
-}
+const db = createClient({ url: env.TURSO_URL, authToken: env.TURSO_AUTH_TOKEN })
+const [id] = await db('posts').insert({ title: 'hello' })
 ```
 
 ### Postgres through Hyperdrive
@@ -178,18 +155,9 @@ export default {
 ```ts
 import { createClient } from 'cf-knex/postgres'
 
-export default {
-  async fetch(req: Request, env: { HYPERDRIVE: Hyperdrive }) {
-    const db = createClient({ hyperdrive: env.HYPERDRIVE })
-    try {
-      // Postgres has no insertId — ask for it with .returning(), as with stock Knex.js.
-      const [row] = await db('posts').insert({ title: 'hello' }).returning('id')
-      return Response.json(row)
-    } finally {
-      await db.destroy()
-    }
-  },
-}
+const db = createClient({ hyperdrive: env.HYPERDRIVE })  // env: { HYPERDRIVE: Hyperdrive }
+// Postgres has no insertId — ask for it with .returning(), as with stock Knex.js.
+const [row] = await db('posts').insert({ title: 'hello' }).returning('id')
 ```
 
 ### MySQL through Hyperdrive
@@ -197,20 +165,11 @@ export default {
 ```ts
 import { createClient } from 'cf-knex/mysql'
 
-export default {
-  async fetch(req: Request, env: { HYPERDRIVE: Hyperdrive }) {
-    const db = createClient({ hyperdrive: env.HYPERDRIVE })
-    try {
-      await db.transaction(async (trx) => {
-        await trx('accounts').where('id', 1).decrement('balance', 100)
-        await trx('accounts').where('id', 2).increment('balance', 100)
-      })
-      return new Response('ok')
-    } finally {
-      await db.destroy()
-    }
-  },
-}
+const db = createClient({ hyperdrive: env.HYPERDRIVE })
+await db.transaction(async (trx) => {
+  await trx('accounts').where('id', 1).decrement('balance', 100)
+  await trx('accounts').where('id', 2).increment('balance', 100)
+})
 ```
 
 ### Credentials instead of a URL
@@ -242,16 +201,8 @@ client. It throws `AMBIGUOUS_CONNECTION` if there is more than one and you did n
 ```ts
 import { fromEnv } from 'cf-knex'
 
-export default {
-  async fetch(req: Request, env: Env) {
-    const db = fromEnv(env)
-    try {
-      return Response.json(await db('posts').select('*'))
-    } finally {
-      await db.destroy()
-    }
-  },
-}
+const db = fromEnv(env)
+await db('posts').select('*')
 ```
 
 ## Configuration
@@ -300,10 +251,9 @@ Hyperdrive does not currently support MySQL AuthSwitchRequest messages
 ```
 
 Observed 2026-08-06 against a Serverless cluster. Hyperdrive's MySQL support does not
-carry the authentication handshake that tier requires, so there is no fallback to the
-wire protocol and the HTTP driver is not merely the better option — it is the only one.
-TiDB Dedicated and self-hosted TiDB are unaffected: they are ordinary MySQL origins and
-work through Hyperdrive with `cf-knex/mysql`.
+carry the authentication handshake that tier requires, so the HTTP driver is not the
+better option but the only one. TiDB Dedicated and self-hosted TiDB are unaffected —
+ordinary MySQL origins, fine through Hyperdrive with `cf-knex/mysql`.
 
 ## Capabilities
 
@@ -328,12 +278,11 @@ These are measured behaviours, not theory. Each one is covered by a test.
 them.**
 `@tidbcloud/serverless`'s `Connection.begin()` returns a *brand-new* `Connection` rather
 than mutating the one you called it on. Knex.js issues `BEGIN`/`COMMIT`/`ROLLBACK` as plain
-SQL on the single handle it holds for the transaction's lifetime, so those statements
-have nowhere to go — passed through naively, each would run on its own throwaway
-session, and every write inside the block would land outside the transaction while
-looking perfectly successful. cf-knex intercepts them and drives the real `Tx` object,
-forwarding everything else (savepoints included) to it unchanged. This is the single
-sharpest edge in the library and the reason it exists.
+SQL on the single handle it holds for the transaction's lifetime, so passed through
+naively each would run on its own throwaway session, and every write inside the block
+would land outside the transaction while looking perfectly successful. cf-knex intercepts
+them and drives the real `Tx` object, forwarding everything else (savepoints included) to
+it unchanged.
 
 **TiDB Cloud Serverless over HTTP cannot stream.** `Connection.execute()` awaits `response.json()` in
 full; the package exposes no cursor or chunked-read API to wrap, so `.stream()` throws
@@ -343,12 +292,10 @@ through Hyperdrive with `cf-knex/mysql`.
 
 **Migrations and seeds do not run inside a Worker.** Knex.js's `package.json` maps its
 `Migrator` and `Seeder` modules to a no-op through the `browser` field, and real
-wrangler/esbuild honours that, so accessing `db.migrate`/`db.seed` in a deployed Worker
-fails — this is Knex.js's own packaging, not something cf-knex can make work from library
-code. What cf-knex does do is turn that failure into a typed one: instead of a bare,
-unattributable `TypeError: Migrator is not a constructor`, `db.migrate`/`db.seed` throw
-`CfKnexError` with code `UNSUPPORTED_CAPABILITY`, naming the capability and pointing at
-running migrations from your own tooling instead. Run migrations from Node or CI against
+wrangler/esbuild honours that — Knex.js's own packaging, not something cf-knex can work
+around from library code. All cf-knex can do is make the failure legible: instead of a
+bare `TypeError: Migrator is not a constructor`, `db.migrate`/`db.seed` throw
+`CfKnexError` with code `UNSUPPORTED_CAPABILITY`. Run migrations from Node or CI against
 the same database — with stock Knex.js, or `wrangler d1 migrations apply` for D1. Schema
 building at runtime (`db.schema.createTable(…)`) works fine on every backend.
 
@@ -369,10 +316,9 @@ precision, but they disagree about where that line falls:
 
 Measured, not inferred — the same query on each backend. It bites on arithmetic and on
 `===`: `count > 10` compares strings, and `count === 0` is never true. Wrap every
-aggregate except `max`/`min` — `Number(row.count)` — which is correct everywhere. Note
-that `mysql2` returning a number for `count()` but a string for `sum()` is the trap: code
-written against MySQL and moved to TiDB Serverless or Postgres breaks on `count`
-specifically.
+aggregate except `max`/`min` in `Number()`. The trap is `mysql2`'s row: a number for
+`count()` but a string for `sum()`, so code written against MySQL and moved to TiDB
+Serverless or Postgres breaks on `count` specifically.
 
 **Large integer *columns* need `intMode` on Turso/libsql.** The libsql driver defaults to
 `intMode: 'number'`, and decoding a column value above `Number.MAX_SAFE_INTEGER` under
@@ -416,16 +362,14 @@ in a module-level global: workerd rejects reusing I/O objects across requests wi
 Hyperdrive pools server-side, and D1, Turso and TiDB Serverless over HTTP have no connection to
 re-establish.
 
-**How much `destroy()` matters depends on the backend.** On `mysql2`, `pg` and `libsql`
-it ends real sockets and clients that would otherwise be left for the server to time out.
-On D1 and TiDB Serverless over HTTP the adapter's `destroy()` is an empty function — there is no
-socket and no server-side session — so it is there for uniformity, and dropping it costs
-you nothing. The examples keep it everywhere so that switching backends never silently
-turns a no-op into a leak.
+**How much `destroy()` matters depends on the backend.** On `mysql2`, `pg` and `libsql` it
+ends real sockets that would otherwise be left for the server to time out. On D1 and TiDB
+Serverless over HTTP it is an empty function — no socket, no server-side session. The
+examples call it everywhere so that switching backends never turns a no-op into a leak.
 
-cf-knex cannot call it for you: it never sees your `Response`, so it cannot know when the
-request is done. Closing after each query would break transactions and multi-statement
-handlers. If you would rather not `await` it, `ctx.waitUntil(db.destroy())` works.
+cf-knex cannot call it for you: it never sees your `Response`, and closing after each
+query would break transactions. `ctx.waitUntil(db.destroy())` works if you would rather
+not `await` it.
 
 The internal pool defaults to `{ min: 0, max: 5 }` rather than Knex.js's `{ min: 2, max: 10 }`,
 because a `min` above zero pins connections open for the life of the client. Override it
@@ -471,8 +415,7 @@ cannot infer a driver from url 'oracle://***@host/db' — set driver explicitly
 cannot infer a driver from url 'https://db.turso.io/?authToken=***' — set driver explicitly
 ```
 
-Every query value is masked, not just parameters whose names look like credentials. Errors
-raised by the underlying driver are passed through as the driver wrote them.
+Every query value is masked, not just parameters whose names look like credentials.
 
 ## Tested against
 
@@ -490,22 +433,20 @@ tiers run in CI against real services.
 | Neon | live, both the pooler and the direct endpoint |
 | Neon behind a real Hyperdrive binding | live, `wrangler dev --remote` |
 
-The Hyperdrive row is worth separating from the two "Hyperdrive-shaped config" rows above
-it. Those use `localConnectionString`, which gives the binding's *shape* but connects
-straight to Docker — so they prove the code path, not the product. The Neon row was run
-against an actual Hyperdrive configuration from a deployed Worker: DDL, `insert` with
-`returning`, a committed transaction, a rolled-back transaction, row streaming and
-aggregates all behaved as they do direct.
+The two "Hyperdrive-shaped config" rows use `localConnectionString`, which gives the
+binding's *shape* but connects straight to Docker — they prove the code path, not the
+product. The last row is a real Hyperdrive configuration driven from a Worker: DDL,
+`insert … returning`, a committed and a rolled-back transaction, streaming and aggregates
+all behaved as they do direct.
 
 The suite also runs against both ends of the declared Knex.js peer range (3.1.0 and 3.3.0).
 
-Where each suite runs is worth knowing. D1, libsql and TiDB Serverless over HTTP are exercised
-*inside* workerd. `mysql2` and `pg` are not: `@cloudflare/vitest-pool-workers` cannot
-import either package, a documented module-resolution limitation of that test pool rather
-than of Workers. Their conformance suites therefore run under Node, and their behaviour on
-workerd itself was established separately with `wrangler dev` against a live MySQL —
-outbound TCP, buffered queries and row streaming all work. Every entry point is
-additionally built with real wrangler on each push.
+D1, libsql and TiDB Serverless over HTTP are exercised *inside* workerd. `mysql2` and `pg`
+are not: `@cloudflare/vitest-pool-workers` cannot import either package, a documented
+limitation of that test pool rather than of Workers. Their conformance suites run under
+Node, and their behaviour on workerd was established separately with `wrangler dev`
+against a live MySQL — outbound TCP, buffered queries and row streaming all work. Every
+entry point is additionally built with real wrangler on each push.
 
 ## Development
 
