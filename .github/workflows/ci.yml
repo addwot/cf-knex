@@ -19,10 +19,22 @@ jobs:
   static:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # These three majors are the first ones that declare `using: node24`.
+      # v4 of each still ran, but only because the runner force-migrated them
+      # off the deprecated Node 20, which it warns about on every job and will
+      # eventually stop doing.
+      #
+      # Two behaviour changes in this range were checked rather than assumed:
+      # setup-node v6 narrowed *automatic* caching to npm, which does not apply
+      # here because `cache: pnpm` is passed explicitly and is still a supported
+      # value in v7; and checkout v6 moved persisted git credentials to a
+      # separate file, which does not affect the release job because
+      # changesets/action authenticates its own push rather than reusing
+      # checkout's credentials.
+      - uses: actions/checkout@v7
       - run: corepack enable
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       # Prints the pnpm version actually resolved from `packageManager` in
@@ -63,7 +75,7 @@ jobs:
     steps:
       # gitleaks scans commit history, not just the working tree — a shallow
       # checkout would only let it see the single most recent commit.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: gitleaks/gitleaks-action@v2
         env:
@@ -124,10 +136,10 @@ jobs:
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE_MYSQL: mysql://root:root@127.0.0.1:3306/cf_knex_test
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE_PG: postgres://postgres:postgres@127.0.0.1:5432/cf_knex_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: corepack enable
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm --version
@@ -173,10 +185,10 @@ jobs:
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       NEON_URL: ${{ secrets.NEON_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: corepack enable
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       # All three hosted suites live under test/integration/ (each gated on
@@ -221,10 +233,10 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: corepack enable
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
