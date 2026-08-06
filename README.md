@@ -1,14 +1,14 @@
 # cf-knex
 
-Knex query-builder syntax on Cloudflare Workers — MySQL, TiDB, Postgres, D1 and Turso,
+Knex query-builder syntax on Cloudflare Workers — TiDB, MySQL, Postgres, D1 and Turso,
 connected directly or through Hyperdrive.
 
 ```ts
-import { createClient } from 'cf-knex/d1'
+import { createClient } from 'cf-knex/tidb'
 
 export default {
-  async fetch(req: Request, env: { DB: D1Database }) {
-    const db = createClient({ binding: env.DB })
+  async fetch(req: Request, env: { TIDB_URL: string }) {
+    const db = createClient({ url: env.TIDB_URL })
     const users = await db('users').where('active', true).select('id', 'email')
     return Response.json(users)
   },
@@ -17,23 +17,34 @@ export default {
 
 ## Why this exists
 
-Stock knex does not build for a Worker. `import Knex from 'knex'` reaches
-`knex/lib/dialects/index.js`, a frozen map of literal `require()` calls for all twelve
-dialects. They are lazy at runtime, but a Workers bundler resolves them at build time,
-and knex's `browser` field neutralises only the *bare* specifiers — the mariadb dialect
-asks for the subpath `mariadb/callback`, which escapes, so the build fails with:
+I wanted to use TiDB Serverless from a Cloudflare Worker with knex, and could not.
+
+The first problem is that a Worker has no TCP sockets, so `mysql2` is not an option
+without putting Hyperdrive in front of the database. TiDB Cloud ships an HTTP driver
+for exactly this situation — `@tidbcloud/serverless` — but knex has no dialect for it,
+so the query builder and the driver had no way to meet.
+
+The second problem is worse, and it is not TiDB's fault: **stock knex does not build for
+a Worker at all.** `import Knex from 'knex'` reaches `knex/lib/dialects/index.js`, a
+frozen map of literal `require()` calls for all twelve dialects. They are lazy at
+runtime, but a Workers bundler resolves them at build time, and knex's `browser` field
+neutralises only the *bare* specifiers — the mariadb dialect asks for the subpath
+`mariadb/callback`, which escapes it, so the build dies before any of your code runs:
 
 ```
 ✘ [ERROR] Could not resolve "mariadb/callback"
 ```
 
-cf-knex never imports knex's main entry. It builds on knex's dialect classes directly and
-supplies its own connection layer, so every entry point bundles under a real
+So this started as a TiDB-over-HTTP wrapper and grew into the general answer. cf-knex
+never imports knex's main entry. It builds on knex's dialect classes directly and
+supplies its own connection layer per backend, so every entry point bundles under a real
 `wrangler deploy` with no `alias` entries in your `wrangler.jsonc`. That claim is a CI
 gate, not a promise: every push packs the published tarball, installs it into a throwaway
 project with real wrangler, and runs `wrangler deploy --dry-run` for all six entry points.
 
-You still get knex — the query builder, schema builder, and transactions are knex's own.
+Once the plumbing existed for TiDB, the other four backends were the same shape of work,
+so they are here too. You still get knex — the query builder, schema builder, and
+transactions are knex's own.
 
 ## Install
 
@@ -46,11 +57,11 @@ only need the one you actually connect with.
 
 | Backend | Package |
 |---|---|
-| D1 | *none* — the binding is the driver |
-| Turso / libsql | `@libsql/client` |
 | TiDB Serverless (HTTP) | `@tidbcloud/serverless` |
 | MySQL / MariaDB / TiDB (wire protocol) | `mysql2` |
 | Postgres / Neon | `pg` |
+| Turso / libsql | `@libsql/client` |
+| D1 | *none* — the binding is the driver |
 
 Your `wrangler.jsonc` needs Node compatibility — knex itself uses `events` and `timers`:
 
@@ -65,26 +76,52 @@ Your `wrangler.jsonc` needs Node compatibility — knex itself uses `events` and
 **Per-backend entry** — smallest bundle, narrowest options type:
 
 ```ts
-import { createClient } from 'cf-knex/postgres'
+import { createClient } from 'cf-knex/tidb'
 
-const db = createClient({ hyperdrive: env.HYPERDRIVE })
+const db = createClient({ url: env.TIDB_URL })
 ```
 
-**Root entry** — pick the backend at runtime with `engine`:
+**Root entry** — pick the backend at runtime with `engine`, plus `driver` where one
+engine has more than one driver. TiDB is such a case: `engine: 'mysql'` reaches it over
+the wire protocol, `driver: 'tidb-http'` over TiDB Cloud's HTTP API.
 
 ```ts
 import { createClient } from 'cf-knex'
 
-const db = createClient({ engine: 'postgres', hyperdrive: env.HYPERDRIVE })
+const db = createClient({ engine: 'mysql', driver: 'tidb-http', url: env.TIDB_URL })
 ```
 
 Both return a real `Knex` instance. The per-backend entries pull in only their own
-adapter; importing `cf-knex/d1` does not bundle the Postgres or MySQL code.
+adapter; importing `cf-knex/tidb` does not bundle the Postgres or MySQL code.
 
 ## Examples
 
 Each block is a complete Worker. `db.destroy()` at the end of the request is deliberate —
 see [Lifetime](#lifetime).
+
+### TiDB Serverless over HTTP
+
+The case this library was written for. No Hyperdrive and no TCP — this driver speaks
+TiDB Cloud's HTTP API, so it works from a Worker with nothing in front of it.
+
+```ts
+import { createClient } from 'cf-knex/tidb'
+
+export default {
+  async fetch(req: Request, env: { TIDB_URL: string }) {
+    const db = createClient({ url: env.TIDB_URL })
+    try {
+      return Response.json(await db('posts').count('* as n').first())
+    } finally {
+      await db.destroy()
+    }
+  },
+}
+```
+
+The `url` is the connection string TiDB Cloud gives you for the serverless driver. TiDB
+also speaks the MySQL wire protocol — if you would rather use that, put Hyperdrive in
+front of it and import `cf-knex/mysql` instead.
 
 ### D1
 
@@ -154,26 +191,6 @@ export default {
         await trx('accounts').where('id', 2).increment('balance', 100)
       })
       return new Response('ok')
-    } finally {
-      await db.destroy()
-    }
-  },
-}
-```
-
-### TiDB Serverless over HTTP
-
-No Hyperdrive and no TCP — this driver speaks TiDB Cloud's HTTP API, so it works from a
-Worker with nothing in front of it.
-
-```ts
-import { createClient } from 'cf-knex/tidb'
-
-export default {
-  async fetch(req: Request, env: { TIDB_URL: string }) {
-    const db = createClient({ url: env.TIDB_URL })
-    try {
-      return Response.json(await db('posts').count('* as n').first())
     } finally {
       await db.destroy()
     }
@@ -260,13 +277,13 @@ through Hyperdrive, say — set `driver: 'mysql2'` explicitly.
 
 ## Capabilities
 
-| Driver | Engine | Transactions | Streaming |
-|---|---|---|---|
-| `mysql2` | mysql | yes | yes |
-| `pg` | postgres | yes | yes |
-| `tidb-http` | mysql | yes | no |
-| `libsql` | sqlite | yes | no |
-| `d1` | sqlite | no | no |
+| Driver | Backend | Engine | Transactions | Streaming |
+|---|---|---|---|---|
+| `tidb-http` | ⚡ TiDB Cloud Serverless (HTTP) | mysql | ✅ | ❌ |
+| `mysql2` | 🐬 MySQL / MariaDB / TiDB (wire) | mysql | ✅ | ✅ |
+| `pg` | 🐘 Postgres / Neon | postgres | ✅ | ✅ |
+| `libsql` | 🪶 Turso / libsql | sqlite | ✅ | ❌ |
+| `d1` | 🟠 Cloudflare D1 | sqlite | ❌ | ❌ |
 
 Calling an unsupported capability throws `CfKnexError` with code
 `UNSUPPORTED_CAPABILITY` and a message naming the alternative — never a generic driver
@@ -276,6 +293,22 @@ statements as one atomic unit.
 ## Things that will surprise you
 
 These are measured behaviours, not theory. Each one is covered by a test.
+
+**TiDB transactions over HTTP work, but not the way you would build them.**
+`@tidbcloud/serverless`'s `Connection.begin()` returns a *brand-new* `Connection` rather
+than mutating the one you called it on. knex issues `BEGIN`/`COMMIT`/`ROLLBACK` as plain
+SQL on the single handle it holds for the transaction's lifetime, so those statements
+have nowhere to go — passed through naively, each would run on its own throwaway
+session, and every write inside the block would land outside the transaction while
+looking perfectly successful. cf-knex intercepts them and drives the real `Tx` object,
+forwarding everything else (savepoints included) to it unchanged. This is the single
+sharpest edge in the library and the reason it exists.
+
+**TiDB over HTTP cannot stream.** `Connection.execute()` awaits `response.json()` in
+full; the package exposes no cursor or chunked-read API to wrap, so `.stream()` throws
+`UNSUPPORTED_CAPABILITY` rather than quietly buffering the whole result and pretending.
+If you need real streaming from TiDB, reach it over the MySQL wire protocol through
+Hyperdrive with `cf-knex/mysql`.
 
 **Migrations and seeds do not run inside a Worker.** knex's `package.json` maps its
 `Migrator` and `Seeder` modules to a no-op through the `browser` field, and real
@@ -333,6 +366,17 @@ in a module-level global: workerd rejects reusing I/O objects across requests wi
 `Cannot perform I/O on behalf of a different request`. This costs less than it sounds —
 Hyperdrive pools server-side, and D1, Turso and TiDB-over-HTTP have no connection to
 re-establish.
+
+**How much `destroy()` matters depends on the backend.** On `mysql2`, `pg` and `libsql`
+it ends real sockets and clients that would otherwise be left for the server to time out.
+On D1 and TiDB-over-HTTP the adapter's `destroy()` is an empty function — there is no
+socket and no server-side session — so it is there for uniformity, and dropping it costs
+you nothing. The examples keep it everywhere so that switching backends never silently
+turns a no-op into a leak.
+
+cf-knex cannot call it for you: it never sees your `Response`, so it cannot know when the
+request is done. Closing after each query would break transactions and multi-statement
+handlers. If you would rather not `await` it, `ctx.waitUntil(db.destroy())` works.
 
 The internal pool defaults to `{ min: 0, max: 5 }` rather than knex's `{ min: 2, max: 10 }`,
 because a `min` above zero pins connections open for the life of the client. Override it

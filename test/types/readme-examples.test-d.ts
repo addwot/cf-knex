@@ -20,6 +20,15 @@ import type { Knex } from 'knex'
 const d1Binding = { prepare: () => ({}) } as unknown as D1Database
 const hyperdrive = {} as Hyperdrive
 
+// README order: TiDB leads, being the case the library was written for.
+test('README: TiDB Serverless over HTTP', () => {
+  void (() => {
+    const db = createTidbClient({ url: 'https://example.tidbcloud.com' })
+    expectTypeOf(db).toMatchTypeOf<Knex>()
+    return db('posts').count('* as n').first()
+  })
+})
+
 test('README: D1', () => {
   void (() => {
     const db = createD1Client({ binding: d1Binding })
@@ -54,16 +63,9 @@ test('README: MySQL through Hyperdrive, transaction', () => {
   })
 })
 
-test('README: TiDB Serverless over HTTP', () => {
+test('README: root entry with engine + driver, and the credentials form', () => {
   void (() => {
-    const db = createTidbClient({ url: 'https://example.tidbcloud.com' })
-    return db('posts').count('* as n').first()
-  })
-})
-
-test('README: root entry with engine, and the credentials form', () => {
-  void (() => {
-    const viaEngine = createClient({ engine: 'postgres', hyperdrive })
+    const viaEngine = createClient({ engine: 'mysql', driver: 'tidb-http', url: 'https://example.tidbcloud.com' })
     expectTypeOf(viaEngine).toMatchTypeOf<Knex>()
     return createClient({
       engine: 'mysql',
