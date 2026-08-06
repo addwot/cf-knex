@@ -375,6 +375,14 @@ tiers run in CI against real services.
 
 The suite also runs against both ends of the declared knex peer range (3.1.0 and 3.3.0).
 
+Where each suite runs is worth knowing. D1, libsql and TiDB-over-HTTP are exercised
+*inside* workerd. `mysql2` and `pg` are not: `@cloudflare/vitest-pool-workers` cannot
+import either package, a documented module-resolution limitation of that test pool rather
+than of Workers. Their conformance suites therefore run under Node, and their behaviour on
+workerd itself was established separately with `wrangler dev` against a live MySQL —
+outbound TCP, buffered queries and row streaming all work. Every entry point is
+additionally built with real wrangler on each push.
+
 ## Development
 
 ```sh
