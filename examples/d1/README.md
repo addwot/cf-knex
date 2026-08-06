@@ -4,7 +4,7 @@
 
 - Entry point `cf-knex/d1` · driver *none — the binding is the driver*
 - Transactions ✗ · streaming ✗ — [what differs](#what-differs-on-d1)
-- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 D1 is Cloudflare's own SQLite database. It is reached through a **binding**, not a
 connection string, so there are no credentials in this example at all.

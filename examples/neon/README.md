@@ -5,7 +5,7 @@
 
 - Entry point `cf-knex/postgres` · driver [`pg`](https://www.npmjs.com/package/pg)
 - Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-neon)
-- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 **Neon is Postgres.** There is no Neon adapter and no `cf-knex/neon` entry point —
 you use `cf-knex/postgres` and the `pg` driver, exactly as in

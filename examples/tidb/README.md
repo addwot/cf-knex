@@ -4,7 +4,7 @@
 
 - Entry point `cf-knex/tidb` · driver [`@tidbcloud/serverless`](https://www.npmjs.com/package/@tidbcloud/serverless)
 - Transactions ✓ · streaming ✗ — [what differs](#what-differs-on-tidb-over-http)
-- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 TiDB can be reached two ways from a Worker, and they are genuinely different
 backends in cf-knex. Only TiDB Cloud Serverless offers the first one; self-hosted

@@ -1,5 +1,5 @@
 name: Bug report
-description: Something behaves differently from what the README says
+description: Something behaves differently from what the README or guide says
 labels: [bug]
 body:
   - type: markdown
@@ -76,7 +76,7 @@ body:
       label: What did you expect, and what happened instead?
       description: >-
         If the two disagree about a value's *type* rather than its content, say so
-        explicitly — several backends return aggregates as strings, and the README's
+        explicitly — several backends return aggregates as strings, and the guide's
         "Things that will surprise you" section may already cover it.
     validations:
       required: true
@@ -95,6 +95,6 @@ body:
     attributes:
       label: Before filing
       options:
-        - label: I checked the README's "Things that will surprise you" section for this behaviour.
+        - label: I checked the guide's "Things that will surprise you" section for this behaviour.
         - label: I removed every credential from the text above.
           required: true

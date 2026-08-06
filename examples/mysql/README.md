@@ -5,7 +5,7 @@
 
 - Entry point `cf-knex/mysql` · driver [`mysql2`](https://www.npmjs.com/package/mysql2)
 - Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-mysql)
-- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 MySQL 8 over the wire protocol, via `mysql2` — connected either by URL or through
 a Hyperdrive binding. MariaDB uses the same adapter; see

@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: Known differences between backends
-    url: https://github.com/addwot/cf-knex#things-that-will-surprise-you
+    url: https://github.com/addwot/cf-knex/blob/master/examples/README.md#things-that-will-surprise-you
     about: >-
       Aggregates as strings, insertId widths, what each driver cannot do, and which
       Hyperdrive limitations apply. Check here before filing — several of the most

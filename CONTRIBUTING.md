@@ -5,8 +5,9 @@ this project — the ones you would otherwise discover by having CI reject you.
 
 ## Before you open an issue
 
-Check the README's [Things that will surprise
-you](https://github.com/addwot/cf-knex#things-that-will-surprise-you) first. Several of
+Check the guide's [Things that will surprise
+you](https://github.com/addwot/cf-knex/blob/master/examples/README.md#things-that-will-surprise-you)
+first. Several of
 the most surprising behaviours are deliberate and already documented: aggregates come back
 as strings on most backends, `insertId` is a bigint on TiDB, and a backend that cannot do
 something raises a typed `CfKnexError` rather than pretending it can.
@@ -47,7 +48,7 @@ The directory is chosen by the *runtime a test needs*, not by what kind of test 
 - `test/types/**` is typechecked by `tsc` *and* executed.
 
 A difference between backends gets an assertion, not just a README sentence. That rule is
-why the README's compatibility notes can be trusted: each one has a test behind it.
+why the guide's compatibility notes can be trusted: each one has a test behind it.
 
 ## Conventions the linter and reviewer will hold you to
 

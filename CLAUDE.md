@@ -88,7 +88,9 @@ in `test/env.d.ts`; `process.env` is empty there.
   prepared statements.
 - **Aggregate return types differ per backend** (`count` is a string on `tidb-http` and
   `pg`, a number on `mysql2` and `libsql`; `sum`/`avg` are strings everywhere except
-  libsql; `max`/`min` are always numbers). The table in the README is measured output.
+  libsql; `max`/`min` are always numbers). The table in `examples/README.md` — the guide,
+  which is where every reference section lives; the root README stays a landing page — is
+  measured output.
 
 ## Branches and PRs
 

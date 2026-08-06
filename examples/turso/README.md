@@ -4,7 +4,7 @@
 
 - Entry point `cf-knex/turso` · driver [`@libsql/client`](https://www.npmjs.com/package/@libsql/client)
 - Transactions ✓ · streaming ✗ — [what differs](#what-differs-on-turso)
-- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 Turso is hosted SQLite reached over HTTP, via `@libsql/client`. The same example
 works against a self-hosted `libsql-server`: point `TURSO_URL` at it and drop the

@@ -7,12 +7,13 @@ import { createClient as createTursoClient } from '../../src/entries/turso'
 import { createClient, fromEnv } from '../../src/index'
 import type { Knex } from 'knex'
 
-// Every example in README.md, reduced to the part a compiler can check. A
-// README example that doesn't type-check is a defect the rest of the suite
+// Every example in README.md and examples/README.md (the guide, where the
+// per-backend snippets live), reduced to the part a compiler can check. A
+// documented example that doesn't type-check is a defect the rest of the suite
 // can't see: nothing else in this project consumes the public API the way a
-// reader copying a snippet does. Keep these in step with the README —
+// reader copying a snippet does. Keep these in step with both files —
 // including the imports, which are what prove each entry point exports
-// `createClient` under the name the README uses.
+// `createClient` under the name the docs use.
 //
 // This project's `types` project also executes the file as plain JS, so each
 // body stays inside an uncalled closure: `createClient` builds a real knex
