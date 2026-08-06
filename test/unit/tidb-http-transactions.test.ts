@@ -141,3 +141,34 @@ test('release() on a handle with no open transaction is a no-op', async () => {
   await expect(adapter.release(handle)).resolves.toBeUndefined()
   expect(txRollback).not.toHaveBeenCalled()
 })
+
+// knex emits `SET TRANSACTION ...` immediately before `BEGIN` on the same
+// connection, so a remembered isolation level is meant to survive exactly one
+// statement. If the BEGIN never arrives -- it failed, or the transaction was
+// abandoned before it was sent -- the level must not sit on the pooled handle
+// waiting to be applied to some later, unrelated transaction that asked for
+// no isolation level at all. That would be silently wrong rather than loud:
+// the later transaction would run at an isolation level its caller never
+// requested and has no way to observe.
+test('a remembered isolation level does not leak into a later unrelated transaction', async () => {
+  const { handle, begin } = makeFakeHandle()
+
+  await adapter.execute(handle, 'SET TRANSACTION ISOLATION LEVEL read committed;', [])
+  // The BEGIN that should have followed never arrives; the handle goes back
+  // to the pool and is later reused for ordinary work.
+  await adapter.execute(handle, 'select 1', [])
+
+  await adapter.execute(handle, 'BEGIN;', [])
+  expect(begin).toHaveBeenCalledWith(undefined)
+})
+
+test('a remembered isolation level does not survive a BEGIN that failed', async () => {
+  const { handle, begin } = makeFakeHandle()
+  begin.mockRejectedValueOnce(new Error('network'))
+
+  await adapter.execute(handle, 'SET TRANSACTION ISOLATION LEVEL repeatable read;', [])
+  await expect(adapter.execute(handle, 'BEGIN;', [])).rejects.toThrow('network')
+
+  await adapter.execute(handle, 'BEGIN;', [])
+  expect(begin).toHaveBeenLastCalledWith(undefined)
+})

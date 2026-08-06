@@ -111,6 +111,11 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
 
       if (BEGIN_STATEMENT.test(sql)) {
         const isolation = state?.pendingIsolation
+        // Consumed before `begin()` is called, not after it resolves: a
+        // rejected `begin()` still ends this statement pair, and a level
+        // left behind would be applied to whatever transaction opened next
+        // on this handle.
+        txStates.delete(conn)
         const tx = await conn.begin(isolation ? { isolation } : undefined)
         txStates.set(conn, { tx })
         return { rows: [] }
@@ -121,6 +126,15 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
         txStates.set(conn, { pendingIsolation: parseIsolationLevel(setTransaction[1] ?? '') })
         return { rows: [] }
       }
+
+      // knex emits `SET TRANSACTION ...` as the statement immediately before
+      // its `BEGIN`, so a remembered level is only ever meant to survive one
+      // statement. Reaching any other statement first means that `BEGIN`
+      // never came — the transaction was abandoned, or failed before it was
+      // sent — and the handle goes back to the pool. Dropping the level here
+      // is what stops it from being silently applied to some later,
+      // unrelated transaction that asked for no isolation level at all.
+      if (state) txStates.delete(conn)
 
       const result: unknown = await conn.execute(sql, bindings, { fullResult: true })
       return toRawResult(result)
