@@ -1,0 +1,15 @@
+{
+  "name": "cf-knex-example-mariadb",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Connecting by URL (the default in src/index.ts): the connection string
+  // holds the password, so it is a secret, not a var.
+  //   npx wrangler secret put MARIADB_URL
+
+  // Connecting through Hyperdrive instead: uncomment this block and the
+  // matching line in src/index.ts. Hyperdrive holds the credentials, so the
+  // Worker never sees a password and no secret is needed.
+  // "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<your-hyperdrive-config-id>" }]
+}

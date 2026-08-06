@@ -1,0 +1,15 @@
+{
+  "name": "cf-knex-example-neon",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Connecting by URL (the default in src/index.ts): use Neon's POOLED
+  // endpoint. It holds the password, so it is a secret, not a var.
+  //   npx wrangler secret put NEON_URL
+
+  // Connecting through Hyperdrive instead: uncomment this block and the
+  // matching line in src/index.ts, and give Hyperdrive the DIRECT
+  // (non-pooler) Neon URL -- it does its own pooling.
+  // "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<your-hyperdrive-config-id>" }]
+}

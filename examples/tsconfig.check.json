@@ -1,0 +1,37 @@
+// Typechecks every example against the package's BUILT type surface, so a
+// snippet cannot drift out of date without CI noticing. The examples' own
+// tsconfig.json files are what a consumer copies; this one exists only for
+// `pnpm check:examples` and is never shipped.
+//
+// It points at dist/, not src/, deliberately: dist/*.d.ts is what a consumer
+// actually installs, and checking against src/ would both miss a broken
+// `exports` map and drag this package's own internal dependencies (knex's
+// undeclared deep paths, pg's missing types) into a check that is supposed to
+// be about the examples. `pnpm build` must therefore run first — the
+// check:examples script does that itself.
+//
+// The `paths` entries must stay in step with the `exports` map in package.json:
+// an entry point added there and missed here leaves that example's imports
+// unresolved rather than checked.
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "cf-knex": ["../dist/index.d.ts"],
+      "cf-knex/mysql": ["../dist/mysql.d.ts"],
+      "cf-knex/postgres": ["../dist/postgres.d.ts"],
+      "cf-knex/tidb": ["../dist/tidb.d.ts"],
+      "cf-knex/d1": ["../dist/d1.d.ts"],
+      "cf-knex/turso": ["../dist/turso.d.ts"]
+    }
+  },
+  "include": ["*/src/**/*.ts"]
+}

@@ -34,6 +34,13 @@ jobs:
       - run: pnpm build
       - run: pnpm check:package
       - run: pnpm size
+      # Typechecks examples/*/src/*.ts against dist/*.d.ts — the declarations a
+      # consumer actually installs, not src/. Mapping to src/ instead looks
+      # equivalent and is not: it drags the package's own dependency graph into
+      # the check and reports errors no consumer would ever see. An example that
+      # no longer compiles is a broken first impression, and nothing else in
+      # this workflow reads examples/ at all.
+      - run: pnpm check:examples
       # Packs the tarball `npm publish` would ship, installs it into a
       # throwaway project alongside real wrangler, and runs `wrangler deploy
       # --dry-run` for every published entry point. Nothing else in this

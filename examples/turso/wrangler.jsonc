@@ -1,0 +1,11 @@
+{
+  "name": "cf-knex-example-turso",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    // Not a secret — the auth token is. Set that with:
+    //   npx wrangler secret put TURSO_AUTH_TOKEN
+    "TURSO_URL": "libsql://<database>-<org>.turso.io"
+  }
+}
