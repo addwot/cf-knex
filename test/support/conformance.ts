@@ -94,6 +94,24 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Con
       expect((row as { score: number | null }).score).toBeNull()
     })
 
+    // The positive side of `caps.streaming` is not checked here — it has its
+    // own, much heavier battery in `runStreamingSuite` (./streaming.ts),
+    // which needs 250 rows and a table of its own. This covers the side that
+    // battery structurally cannot: what a caller who reaches for `.stream()`
+    // on a backend that has none actually gets. That is the majority case
+    // (d1, libsql, tidb-http all declare `streaming: false`), and until now
+    // it was only ever proven against a fake adapter in
+    // test/unit/client.test.ts, never end to end through a real one.
+    const noStreamingTest = caps.streaming ? test.skip : test
+    noStreamingTest('.stream() rejects with a documented CfKnexError instead of hanging or yielding nothing', async () => {
+      await expect(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- iterated purely to prove the loop body is never reached
+        for await (const _row of db(table).stream()) {
+          throw new Error('unreachable: should have rejected before yielding any row')
+        }
+      }).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
+    })
+
     if (caps.transactions) {
       test('transaction commits', async () => {
         await db.transaction(async (trx) => { await trx(table).insert({ name: 'grace', score: 7 }) })
