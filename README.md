@@ -278,10 +278,13 @@ statements as one atomic unit.
 These are measured behaviours, not theory. Each one is covered by a test.
 
 **Migrations and seeds do not run inside a Worker.** knex's `package.json` maps its
-`Migrator` and `Seeder` modules to a no-op through the `browser` field, and Workers
-bundlers honour that, so `db.migrate.latest()` throws
-`TypeError: Migrator is not a constructor` at runtime. This is knex's own packaging, not
-something cf-knex can override from library code. Run migrations from Node or CI against
+`Migrator` and `Seeder` modules to a no-op through the `browser` field, and real
+wrangler/esbuild honours that, so accessing `db.migrate`/`db.seed` in a deployed Worker
+fails — this is knex's own packaging, not something cf-knex can make work from library
+code. What cf-knex does do is turn that failure into a typed one: instead of a bare,
+unattributable `TypeError: Migrator is not a constructor`, `db.migrate`/`db.seed` throw
+`CfKnexError` with code `UNSUPPORTED_CAPABILITY`, naming the capability and pointing at
+running migrations from your own tooling instead. Run migrations from Node or CI against
 the same database — with stock knex, or `wrangler d1 migrations apply` for D1. Schema
 building at runtime (`db.schema.createTable(…)`) works fine on every backend.
 

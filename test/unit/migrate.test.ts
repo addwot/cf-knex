@@ -16,8 +16,19 @@ import { CfKnexError } from '../../src/core/errors'
 // specific to `@cloudflare/vitest-pool-workers`' own module resolution --
 // this project's vitest.config.ts documents that this pool uses a different
 // bundler from the one `wrangler` itself builds a Worker with, and the two
-// have disagreed before. Whether `wrangler deploy`'s esbuild step performs
-// the substitution this file rules out here was not tested.
+// have disagreed before. `wrangler deploy --dry-run`'s esbuild step does
+// perform this exact substitution for the relative requires `make-knex.js`
+// itself issues: inspecting a real deployed bundle's output shows
+// `make-knex.js` bundled in full (its `migrate`/`seed` property definitions,
+// `withUserParams`, `queryBuilder` all present, nothing tree-shaken) and
+// `knex/lib/util/noop.js` bundled alongside it, but no `class Migrator` and
+// none of its own further dependencies (`FsMigrations`,
+// `migrationListResolver`) anywhere in the output -- confirming `db.migrate`
+// really does throw `TypeError: Migrator is not a constructor` in a deployed
+// Worker, not merely in theory. That remapping is specific to the *relative*
+// requires inside knex's own files, though: importing
+// `knex/lib/migrations/migrate/Migrator.js` directly as a bare specifier
+// from outside the knex package is not remapped and pulls in the real class.
 test('db.migrate / db.seed do not throw on access -- the real Migrator/Seeder load, not knex\'s browser-field noop stub', () => {
   const db = createKnexClient(createD1Adapter({ binding: env.DB }))
   expect(() => db.migrate).not.toThrow()

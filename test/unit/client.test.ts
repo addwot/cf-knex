@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { createKnexClient } from '../../src/core/client'
+import { createKnexClient, hardenMigrationAccessors } from '../../src/core/client'
 import { CfKnexError } from '../../src/core/errors'
 import { createFakeAdapter } from '../support/fake-adapter'
 
@@ -692,4 +692,135 @@ test('sqlite: Uint8Array/ArrayBuffer bindings pass through unconverted (accepted
   await db.raw('select ?, ? as v', [bytes, buffer])
   expect(calls[0]?.bindings).toEqual([bytes, buffer])
   await db.destroy()
+})
+
+// `hardenMigrationAccessors` (src/core/client.ts) exists because real
+// wrangler/esbuild honours knex's `package.json` `browser` field and
+// substitutes a no-op for `Migrator`/`Seeder`, which makes `db.migrate`/
+// `db.seed` throw a bare `TypeError: Migrator is not a constructor` at
+// property-access time in a deployed Worker --
+// `@cloudflare/vitest-pool-workers` does not honour that field, so that
+// specific failure cannot be reproduced by calling `createKnexClient(...)`
+// in this repo. These tests drive the extracted function directly against a
+// plain object carrying the same accessor shape instead. (For the
+// complementary "the real class loads and behaves normally in this pool"
+// case, see test/unit/migrate.test.ts's `db.migrate`/`db.seed` tests --
+// deliberately not restated here.)
+test('hardenMigrationAccessors: a TypeError from the getter becomes a CfKnexError naming the capability', () => {
+  const target = {
+    get migrate(): unknown {
+      throw new TypeError('Migrator is not a constructor')
+    },
+  }
+  hardenMigrationAccessors(target)
+  try {
+    void target.migrate
+    throw new Error('expected target.migrate to throw')
+  } catch (err) {
+    expect(err).toBeInstanceOf(CfKnexError)
+    expect((err as CfKnexError).code).toBe('UNSUPPORTED_CAPABILITY')
+    // Matched against the capability's own leading phrase, not a bare
+    // `.toContain('migrate')` -- the hint text below also mentions
+    // "migrations/seeds" in prose, so a looser substring check here would
+    // still pass even if the capability argument itself were dropped or
+    // swapped.
+    expect((err as CfKnexError).message).toMatch(/^db\.migrate is not supported/)
+  }
+})
+
+test('hardenMigrationAccessors: hardens seed the same way as migrate, not only migrate', () => {
+  const target = {
+    get seed(): unknown {
+      throw new TypeError('Seeder is not a constructor')
+    },
+  }
+  hardenMigrationAccessors(target)
+  try {
+    void target.seed
+    throw new Error('expected target.seed to throw')
+  } catch (err) {
+    expect(err).toBeInstanceOf(CfKnexError)
+    expect((err as CfKnexError).code).toBe('UNSUPPORTED_CAPABILITY')
+    // Same reasoning as the migrate test above -- the hint text's own prose
+    // mentions "seeds", so this is matched against the leading phrase, not a
+    // bare substring check.
+    expect((err as CfKnexError).message).toMatch(/^db\.seed is not supported/)
+  }
+})
+
+test('hardenMigrationAccessors: a getter that succeeds still returns its value, through the correct `this`', () => {
+  const target = {
+    marker: 'ok',
+    get migrate(): unknown {
+      // Reads `this` deliberately -- a wrapper that calls the original
+      // getter without preserving `this` (e.g. `originalGet()` instead of
+      // `originalGet.call(this)`) would still pass a version of this test
+      // that only checked the return value against a `this`-independent
+      // getter.
+      return this.marker
+    },
+  }
+  hardenMigrationAccessors(target)
+  expect(target.migrate).toBe('ok')
+})
+
+test('hardenMigrationAccessors: a getter that builds a fresh value on every access keeps doing so through the wrapper', () => {
+  let calls = 0
+  const target = {
+    get migrate(): unknown {
+      calls++
+      return { call: calls }
+    },
+  }
+  hardenMigrationAccessors(target)
+  expect(target.migrate).toEqual({ call: 1 })
+  expect(target.migrate).toEqual({ call: 2 })
+})
+
+test('hardenMigrationAccessors: a non-TypeError from the getter propagates unchanged', () => {
+  const boom = new RangeError('boom')
+  const target = {
+    get migrate(): unknown {
+      throw boom
+    },
+  }
+  hardenMigrationAccessors(target)
+  try {
+    void target.migrate
+    throw new Error('expected target.migrate to throw')
+  } catch (err) {
+    expect(err).toBe(boom)
+  }
+})
+
+test('hardenMigrationAccessors: the property stays configurable and an accessor, never a data property', () => {
+  const target = {
+    get migrate(): unknown {
+      return 'value'
+    },
+  }
+  hardenMigrationAccessors(target)
+  const descriptor = Object.getOwnPropertyDescriptor(target, 'migrate')
+  expect(descriptor?.configurable).toBe(true)
+  expect(typeof descriptor?.get).toBe('function')
+  expect(descriptor?.value).toBeUndefined()
+})
+
+test('hardenMigrationAccessors: reads the driver name off target.client.driverName when present, falls back to a generic label when absent', () => {
+  const withDriver = {
+    client: { driverName: 'sqlite3' },
+    get migrate(): unknown {
+      throw new TypeError('x')
+    },
+  }
+  hardenMigrationAccessors(withDriver)
+  expect(() => withDriver.migrate).toThrowError(/sqlite3/)
+
+  const withoutClient = {
+    get migrate(): unknown {
+      throw new TypeError('x')
+    },
+  }
+  hardenMigrationAccessors(withoutClient)
+  expect(() => withoutClient.migrate).toThrowError(/unknown/)
 })
