@@ -10,4 +10,6 @@ Document three things that were wrong or missing, all of them measured rather th
 
 **Neon behind a real Hyperdrive binding is now a verified configuration**, not an assumed one. The existing suites use `localConnectionString`, which exercises the binding's shape while connecting straight to Docker. Running from a Worker against an actual Hyperdrive configuration confirmed DDL, `insert` with `returning`, committed and rolled-back transactions, row streaming and aggregates all behave as they do direct.
 
-Also adds `pnpm bench:tidb`, which compares cf-knex against raw `@tidbcloud/serverless` on byte-identical SQL, and publishes the result: the overhead is not measurable end to end (a round trip dominates at ~70 ms and the run-to-run differences change sign), while the query builder alone costs 2.3–2.5 µs per query. Prose now says "Knex.js" for the query builder throughout.
+Prose now says "Knex.js" for the query builder throughout; lowercase `knex` in code font remains the package name.
+
+Development-only: adds `pnpm bench:tidb`, which compares cf-knex against raw `@tidbcloud/serverless` on byte-identical SQL. Nothing about the published package changes.

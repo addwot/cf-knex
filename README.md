@@ -474,38 +474,6 @@ cannot infer a driver from url 'https://db.turso.io/?authToken=***' — set driv
 Every query value is masked, not just parameters whose names look like credentials. Errors
 raised by the underlying driver are passed through as the driver wrote them.
 
-## Performance
-
-cf-knex's TiDB adapter *is* `@tidbcloud/serverless` underneath, so the only question worth
-asking is what the layer costs. `pnpm bench:tidb` answers it against a real Serverless
-cluster, sending byte-identical SQL on both sides — every statement is taken from Knex.js's
-own `.toSQL()` and handed verbatim to the raw driver — and interleaving the two so network
-drift cannot land on whichever ran second.
-
-Median over 25 iterations, two independent runs:
-
-| Operation | `@tidbcloud/serverless` | cf-knex | run 1 → run 2 |
-|---|---|---|---|
-| `SELECT 1` (round-trip floor) | 69 / 72 ms | 69 / 69 ms | −0.3% → −5.1% |
-| point select by primary key | 70 / 75 ms | 68 / 83 ms | −1.9% → +10.9% |
-| select 20 rows | 70 / 73 ms | 70 / 74 ms | +0.9% → +1.5% |
-| single-row insert | 75 / 74 ms | 72 / 74 ms | −3.8% → +0.9% |
-| transaction (begin, insert, commit) | 222 / 225 ms | 219 / 228 ms | −1.5% → +1.3% |
-
-**The overhead is not measurable end to end.** The differences change sign between runs —
-cf-knex "wins" some and loses others — which is what noise looks like, not a result. One
-round trip to a Serverless cluster costs about 70 ms, and a transaction costs three of
-them.
-
-What *is* measurable is the query builder in isolation, with no database involved:
-**2.3–2.5 µs per query**, against 0.03 µs for a hand-written template string. That is
-roughly 0.003% of a single round trip. Bundle cost is the real trade — 3.3 kB brotli for
-`cf-knex/tidb`, 6.2 kB for the root entry that carries all five adapters.
-
-Run it yourself with `pnpm bench:tidb` (needs `TIDB_URL`). It is deliberately gentle on a
-free cluster: sequential, never concurrent, a few hundred tiny statements against one
-temporary table it drops afterwards.
-
 ## Tested against
 
 Every backend below runs the same conformance suite. Local runs use Docker; the hosted

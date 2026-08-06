@@ -178,11 +178,23 @@ jobs:
 
   # The cloud-only tier: TiDB Serverless, Turso, and Neon. No service
   # containers here; these are real hosted services reached with repository
-  # secrets, which forked PRs never get, so this job is skipped there rather
-  # than failing on empty credentials.
+  # secrets.
+  #
+  # Deliberately not run on pull requests, only on master and on manual
+  # dispatch. Two reasons. Forked PRs never receive repository secrets, so the
+  # job could only ever be skipped there. And on same-repo PRs it is the one
+  # job that costs real quota on three free hosted tiers, charged again on
+  # every push to the branch — which is most of what a review cycle is.
+  #
+  # The trade this makes: a regression in a hosted-tier adapter now turns
+  # master red rather than the PR that caused it. It can still never reach
+  # npm, because `release` below requires this job to have genuinely
+  # succeeded on the very push it would publish from. If that trade stops
+  # being worth it, the middle setting is a `paths` filter that runs this on
+  # PRs touching src/adapters/** and skips it for docs and test changes.
   live:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request'
     env:
       TIDB_URL: ${{ secrets.TIDB_URL }}
       TURSO_URL: ${{ secrets.TURSO_URL }}
@@ -216,11 +228,12 @@ jobs:
 
   # Publishes only if every job above actually succeeded — not skipped, not
   # cancelled, not failed. `needs:` alone would already block this job if a
-  # dependency fails, but a job that was *skipped* (e.g. `live` on a fork
-  # PR — which never applies on the `push` trigger this job requires, but
-  # the check stays regardless) must never be mistaken for one that passed,
-  # so every result is checked explicitly rather than relying on the
-  # implicit behaviour.
+  # dependency fails, but a job that was *skipped* (e.g. `live`, which now
+  # skips itself on every pull request — never on the `push` trigger this
+  # job requires, but the check stays regardless) must never be mistaken for
+  # one that passed, so every result is checked explicitly rather than
+  # relying on the implicit behaviour. This is the check that keeps the
+  # PR-time saving above from ever turning into an unverified publish.
   release:
     needs: [static, gitleaks, test, live]
     if: >-
