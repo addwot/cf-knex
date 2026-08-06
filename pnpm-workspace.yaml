@@ -1,0 +1,15 @@
+# pnpm 10+ refuses to run a dependency's install scripts unless it is listed
+# here, and pnpm 11 reads these settings from this file rather than from a
+# `pnpm` field in package.json (which it now ignores with a warning).
+#
+# Both of these need their postinstall — it is what downloads the platform
+# binary. Without it the failure does not surface at install time: `pnpm build`
+# and the Workers test pool break later, at first use.
+#
+# Deliberately not a workspace root: there is no `packages:` key, so the
+# package.json files under examples/ stay out of the install graph. Those are
+# reference material, installed from the registry the way a consumer would,
+# never linked against the source tree.
+allowBuilds:
+  esbuild: true
+  workerd: true

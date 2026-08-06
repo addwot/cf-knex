@@ -137,23 +137,21 @@ jobs:
       # not after it, unlike `static`'s.
       - run: pnpm add -D knex@${{ matrix.knex }}
       # `pnpm run <script> <flags>` — explicit `run`, and no `--` separator.
-      # Both halves matter, and the two scripts here fail differently without
-      # them, which is why the form is spelled out identically in both jobs:
+      # The `--`-less form is the load-bearing half:
       #
       #   pnpm run test -- --outputFile=x   -> vitest gets `"--" "--outputFile=x"`
       #                                        as positionals; NO report, exit 0
-      #   pnpm test --outputFile=x          -> `test` is a pnpm BUILT-IN command,
-      #                                        so pnpm parses the flag itself and
-      #                                        dies on "Unknown option: outputFile"
       #
-      # `test:integration` is not a built-in, so it takes the implicit-`run`
-      # path and only the first trap applies to it. The `--`-less `run` form is
-      # the one spelling that works for both. Verified locally, every
-      # combination, against these exact commands.
+      # That is the whole reason for this comment. A missing report does not
+      # fail the test run — it fails the assert step below, as "report not
+      # found", with nothing pointing back at the flags that caused it.
       #
-      # The silent half is what makes this worth the comment: a missing report
-      # does not fail the test run, only the assert step below, and it fails
-      # there as "report not found" — nothing that points back at the flags.
+      # The explicit `run` is belt-and-braces rather than strictly required
+      # now. Under pnpm 9 `pnpm test --outputFile=x` died on "Unknown option:
+      # outputFile", because `test` is a pnpm built-in that parsed the flag
+      # itself; pnpm 11 forwards it to the script instead. Re-verified against
+      # pnpm 11.20.0, all three spellings, on these exact commands. Keeping
+      # `run` costs nothing and does not depend on which pnpm a runner picks.
       - run: pnpm run test --reporter=default --reporter=json --outputFile=vitest-report.json
       # Every database above is genuinely up in this job, so none of their
       # conformance suites should ever take the "URL not set" skip path. A
@@ -230,6 +228,27 @@ jobs:
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      # Publishes through npm trusted publishing (OIDC). There is deliberately
+      # no NPM_TOKEN here and no npm token stored on the repository at all:
+      # `id-token: write` above lets pnpm mint a short-lived credential from
+      # the OIDC provider per run, so nothing long-lived exists to leak.
+      #
+      # Three facts this depends on, each verified rather than assumed:
+      #
+      #  - changesets does NOT shell out to `npm publish` here. Its
+      #    `getPublishTool()` detects the package manager from the lockfile
+      #    and runs `pnpm publish` when it finds a pnpm one. So npm's OIDC
+      #    support is irrelevant to this job; pnpm's is what matters.
+      #  - pnpm 10.x cannot do OIDC AT ALL. Unpacked and grepped the real
+      #    tarballs: 10.34.5 (latest 10.x) and 10.13.0 both contain zero
+      #    references to ACTIONS_ID_TOKEN_REQUEST_URL; 11.20.0 has the full
+      #    implementation. Hence the pnpm 11 pin in package.json — dropping
+      #    back to 10.x silently disables trusted publishing rather than
+      #    failing loudly.
+      #  - The trusted publisher itself is configured on npmjs.com against
+      #    this repository and this workflow filename. npm does not validate
+      #    that configuration when it is saved, so a typo there surfaces only
+      #    as a publish failure here. Renaming this file breaks publishing.
       - uses: changesets/action@v1
         with:
           publish: pnpm changeset publish
@@ -237,10 +256,4 @@ jobs:
           commit: 'chore: version packages'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # changesets/action writes its own .npmrc from this variable name
-          # specifically (verified against its README) — actions/setup-node's
-          # `registry-url` input is deliberately not used in this job, since
-          # it would write a project-level .npmrc of its own first and the
-          # action does not overwrite an .npmrc it finds already present.
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
