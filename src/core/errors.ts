@@ -8,6 +8,7 @@ export type CfKnexErrorCode =
   | 'INCOMPATIBLE_KNEX'
   | 'MALFORMED_DRIVER_RESULT'
   | 'COMMIT_SILENTLY_ROLLED_BACK'
+  | 'ISOLATION_LEVEL_NOT_CONFIGURABLE'
 
 export class CfKnexError extends Error {
   readonly code: CfKnexErrorCode
@@ -34,6 +35,13 @@ export class CfKnexError extends Error {
     return new CfKnexError(
       'COMMIT_SILENTLY_ROLLED_BACK',
       `COMMIT did not take effect: the connection's transaction was already aborted, so the database executed this COMMIT as a ROLLBACK instead. ${detail}`,
+    )
+  }
+
+  static isolationLevelNotConfigurable(driver: string, level: string): CfKnexError {
+    return new CfKnexError(
+      'ISOLATION_LEVEL_NOT_CONFIGURABLE',
+      `${driver} does not support a configurable transaction isolation level (requested '${level}'). Omit .transaction({ isolationLevel: ... }) for this driver.`,
     )
   }
 }

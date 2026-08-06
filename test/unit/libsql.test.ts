@@ -1,26 +1,23 @@
 import { expect, test, vi } from 'vitest'
 import { CfKnexError } from '../../src/core/errors'
 import { createLibsqlAdapter } from '../../src/adapters/libsql'
-import type { Client } from '@libsql/client'
+import type { Client, Transaction } from '@libsql/client'
 
-test('declares dialect sqlite, driver libsql, and no streaming/transactions', () => {
+test('declares dialect sqlite, driver libsql, no streaming, and real transactions', () => {
   const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
   expect(adapter.dialect).toBe('sqlite')
   expect(adapter.driver).toBe('libsql')
   expect(adapter.capabilities.streaming).toBe(false)
-  // See src/adapters/libsql.ts's own doc comment for the live-verified
-  // evidence: routing BEGIN/COMMIT/ROLLBACK through this adapter's plain
-  // execute() reproduced the worst failure this project's contract has --
-  // a "rolled back" row still present afterward -- when checked directly
-  // against the docker container with capabilities.transactions forced to
-  // true.
-  expect(adapter.capabilities.transactions).toBe(false)
+  // execute() no longer sends BEGIN/COMMIT/ROLLBACK through the isolated
+  // per-call path that made this false -- see src/adapters/libsql.ts's
+  // "Transactions" doc comment for the live-verified evidence and its
+  // execute()'s own comment for what routes each statement where instead.
+  expect(adapter.capabilities.transactions).toBe(true)
 })
 
-test('hints.transactions names this package\'s real atomic primitives, not just the generic default', () => {
+test('has no hints.transactions override -- the capability itself is supported now', () => {
   const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
-  expect(adapter.hints?.transactions).toMatch(/Client\.batch\(\)/)
-  expect(adapter.hints?.transactions).toMatch(/Client\.transaction\(\)/)
+  expect(adapter.hints?.transactions).toBeUndefined()
 })
 
 test('omits validate() entirely -- neither the http nor the ws Client exposes genuine staleness on this handle (regression)', () => {
@@ -177,6 +174,48 @@ test('destroy() does not re-close a handle that release() already closed', async
   await adapter.destroy()
 
   expect(spy).toHaveBeenCalledTimes(1)
+})
+
+test('release() rolls back a transaction still open on the handle before closing it', async () => {
+  // A live integration test proves this doesn't corrupt data (the row never
+  // becomes durable either way), but @libsql/client's HttpClient.close()
+  // turns out to also tear down a pending transaction as a side effect of
+  // closing its underlying stream (confirmed live: a transaction abandoned
+  // by only closing the client, with rollback() never called at all, still
+  // doesn't block a later writer) -- so that black-box check alone can't
+  // tell whether release() actually calls rollback(), only whether closing
+  // happened at all. This pins the call directly instead.
+  const rollback = vi.fn().mockResolvedValue(undefined)
+  const tx = { execute: vi.fn(), commit: vi.fn(), rollback, close: vi.fn() } as unknown as Transaction
+  const transaction = vi.fn().mockResolvedValue(tx)
+  const close = vi.fn()
+  const handle = { transaction, close } as unknown as Client
+  const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
+
+  await adapter.execute(handle, 'BEGIN', [])
+  await adapter.release(handle)
+
+  expect(rollback).toHaveBeenCalledTimes(1)
+  expect(close).toHaveBeenCalledTimes(1)
+})
+
+test('destroy() rolls back a transaction still open on an un-released handle before closing it', async () => {
+  // Same reasoning as the release() test above -- pins the rollback() call
+  // itself rather than a downstream effect that turns out to happen anyway
+  // for an unrelated reason. Spies on the real acquire()'d handle's own
+  // transaction() (as the other destroy() tests here spy on close()) rather
+  // than faking the handle outright, since destroy() only reaches handles
+  // that came from this adapter's own `open` set.
+  const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
+  const handle = (await adapter.acquire()) as Client
+  const rollback = vi.fn().mockResolvedValue(undefined)
+  const tx = { execute: vi.fn(), commit: vi.fn(), rollback, close: vi.fn() } as unknown as Transaction
+  vi.spyOn(handle, 'transaction').mockResolvedValue(tx)
+
+  await adapter.execute(handle, 'BEGIN', [])
+  await adapter.destroy()
+
+  expect(rollback).toHaveBeenCalledTimes(1)
 })
 
 test('acquire() loads @libsql/client and returns a usable handle inside workerd, with no network I/O', async () => {
