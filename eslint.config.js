@@ -40,4 +40,13 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // test/integration/migrate.test.ts loads these off disk through knex's
+    // default `FsMigrations` source. `.cjs` (rather than plain `.js`,
+    // ambiguous under this project's own `"type": "module"`) forces
+    // CommonJS loading, so `exports.up`/`exports.seed` need the CommonJS
+    // globals ESLint's flat config only adds for `sourceType: 'commonjs'`.
+    files: ['test/support/fixtures-migrate/**/*.cjs'],
+    languageOptions: { sourceType: 'commonjs' },
+  },
 )
