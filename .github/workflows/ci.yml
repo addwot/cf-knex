@@ -77,7 +77,11 @@ jobs:
       # checkout would only let it see the single most recent commit.
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
+      # v3 is a runtime bump and nothing else — same inputs, outputs and
+      # behaviour, per its release notes. Not optional for long: Node 20
+      # leaves GitHub-hosted runners on 2026-09-16, at which point v2 stops
+      # running at all rather than being force-migrated as it is today.
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Only required for organization-owned repos, not personal
