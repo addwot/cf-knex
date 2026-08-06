@@ -369,8 +369,16 @@ try {
 | `INCOMPATIBLE_KNEX` | The installed knex does not expose what cf-knex needs |
 
 Where cf-knex puts a connection URL into one of its own messages, the credentials are
-stripped first — a malformed URL is reported as `postgres://***@host/db`. Errors raised by
-the underlying driver are passed through as the driver wrote them.
+stripped first. Both places a secret rides in a URL are covered — the userinfo section and
+the query string:
+
+```
+cannot infer a driver from url 'oracle://***@host/db' — set driver explicitly
+cannot infer a driver from url 'https://db.turso.io/?authToken=***' — set driver explicitly
+```
+
+Every query value is masked, not just parameters whose names look like credentials. Errors
+raised by the underlying driver are passed through as the driver wrote them.
 
 ## Tested against
 
