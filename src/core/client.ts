@@ -1,17 +1,11 @@
 import type { Knex as KnexType } from 'knex'
-// The knex *factory* (`import Knex from 'knex'`, what this file used
-// before) reaches `knex/lib/dialects/index.js` — a static, module-scope
-// import a bundler must follow even though the branch that would use it
-// never runs here (see knex-dialects.d.ts). `makeKnex` is the deeper piece
-// that turns an already-constructed client into a callable `knex()`
-// instance without going through that resolution path at all.
+// The knex factory (`import Knex from 'knex'`) statically reaches `knex/lib/dialects/index.js`,
+// which a bundler must follow even though that branch never runs here (see knex-dialects.d.ts).
+// `makeKnex` builds a callable `knex()` from an already-constructed client, bypassing that path.
 import makeKnex from 'knex/lib/knex-builder/make-knex.js'
-// knex ships types only for its public entry point; these deep CJS dialect
-// paths have no shipped declarations — see ./knex-dialects.d.ts. The
-// trailing `/index.js` is required, not cosmetic: knex has no `exports` map,
-// so plain Node ESM (no bundler) refuses to resolve a bare directory import
-// here (`ERR_UNSUPPORTED_DIR_IMPORT`) even though `require()` and every
-// bundler resolve it fine without it.
+// knex ships no types for these deep CJS dialect paths (see ./knex-dialects.d.ts). Trailing
+// `/index.js` is required: knex has no `exports` map, so plain Node ESM would otherwise throw
+// `ERR_UNSUPPORTED_DIR_IMPORT` (require() and bundlers resolve it fine either way).
 import Client_MySQL2 from 'knex/lib/dialects/mysql2/index.js'
 import Client_PG from 'knex/lib/dialects/postgres/index.js'
 import Client_SQLite3 from 'knex/lib/dialects/sqlite3/index.js'
@@ -20,20 +14,10 @@ import { toKnexResponse } from './response'
 import type { Dialect, DriverAdapter } from './types'
 
 /**
- * The subset of Node's `Writable` interface `_stream()` below needs. knex's
- * own `Runner.stream()` (node_modules/knex/lib/execution/runner.js) always
- * builds this as a real `Transform` (`new Transform({ objectMode: true, ...
- * })`) and passes it through `Client.prototype.stream()` →
- * `_stream(connection, queryObject, stream, options)`
- * (node_modules/knex/lib/client.js), so at runtime this is always a genuine
- * Node stream. This project has no `@types/node` dependency and deliberately
- * keeps it that way (see test/process.d.ts for the same constraint applied
- * to `process`) — `src` is imported by both the `workers` and `node` vitest
- * projects (see vitest.config.ts), and this file in particular is the one
- * every adapter, including the workerd-only ones, is wired through, so
- * pulling in the full Node stream surface here would be misleading. Declare
- * only the members actually called below, the same shim-over-untyped-import
- * pattern src/adapters/mysql2.ts's `Mysql2ConnectionShim` uses.
+ * Subset of Node's `Writable` interface `_stream()` needs. knex's own `Runner.stream()`
+ * (execution/runner.js) always passes a real `Transform` here, but this project has no
+ * `@types/node` dependency (see test/process.d.ts), so only the members actually used are
+ * declared — same shim pattern as src/adapters/mysql2.ts's `Mysql2ConnectionShim`.
  */
 type StreamSink = {
   readonly destroyed: boolean
@@ -49,49 +33,33 @@ type StreamSink = {
 }
 
 /**
- * Thrown internally by `waitForDrain` — never surfaced to a caller — when
- * the destination stream closes on its own instead of draining. Node's
- * `Readable` async-iterator protocol destroys the stream a consumer is
- * `for await`-ing as soon as that consumer stops early (a `break`, e.g.
- * `for await (const row of db(t).stream()) { if (done) break }`), and does
- * so without ever emitting 'drain' again — verified empirically (a `Transform`
- * destroyed this way emits 'close', and in that specific case also 'error',
- * but never another 'drain'). A write loop that only waited on 'drain' would
- * hang forever the moment backpressure and an early consumer exit coincide.
- * This being a distinct type (not a plain rejection) is what lets the catch
- * block below tell "the consumer walked away, stop quietly" apart from a
- * real failure that must reject `_stream()`'s own promise and be reported.
+ * Thrown internally by `waitForDrain`, never surfaced to a caller: when a
+ * `for await` consumer stops early, Node destroys the readable side without
+ * ever emitting another 'drain' — only 'close' (and sometimes 'error') —
+ * verified empirically. A write loop that only waited on 'drain' would hang
+ * forever once backpressure and an early exit coincide. A distinct type
+ * (not a plain rejection) lets the catch block below tell "consumer walked
+ * away" apart from a real failure.
  */
 class StreamSinkClosed extends Error {}
 
 /**
- * `true` for the exact error Node's own `Readable` async-iterator protocol
- * raises on the stream it is `for await`-ing when a consumer stops early — a
- * `break` inside `for await (const row of db(t).stream())` calls `.return()`
- * on the readable side, which destroys it, which — confirmed empirically,
- * consistently, independent of whether a read was pending at the moment of
- * the `break` — emits this *before* 'close', not instead of it: `name:
- * 'AbortError'`, `code: 'ABORT_ERR'`. This is Node's own signal for "the
- * reader walked away," structurally identical in intent to `StreamSinkClosed`
- * below (both exist to tell "the consumer lost interest" apart from "the
- * write actually failed") — `waitForDrain`'s `onError` treats it exactly the
- * same way, rather than rejecting with it as if it were a genuine failure a
- * caller needs to hear about.
+ * `true` for the error Node's `Readable` async-iterator protocol raises
+ * when a `for await` consumer stops early: `.return()` destroys the stream
+ * and emits this — `name: 'AbortError'`, `code: 'ABORT_ERR'` — *before*
+ * 'close', confirmed empirically. Same intent as `StreamSinkClosed` ("the
+ * reader walked away," not a write failure), so `waitForDrain`'s `onError`
+ * treats it the same way instead of rejecting.
  */
 function isSinkAbortedByReader(err: unknown): boolean {
   return err instanceof Error && (err as { code?: unknown }).code === 'ABORT_ERR' && err.name === 'AbortError'
 }
 
 /**
- * Resolves once `stream` emits 'drain', or rejects/resolves once it becomes
- * clear no 'drain' is coming — see `StreamSinkClosed` above for why both
- * outcomes exist. `stream.destroyed` is checked up front for the same reason:
- * a stream already destroyed before this is even called (the consumer left
- * between one write and the next) will not emit a fresh 'close' for a
- * listener attached after the fact, and 'close'/'drain' both being events
- * `EventEmitter` only fires forward in time, never replays past
- * ones — waiting on them unconditionally would hang exactly as long as never
- * checking `destroyed` at all.
+ * Resolves once `stream` emits 'drain', or rejects once no 'drain' is
+ * coming (see `StreamSinkClosed`). `stream.destroyed` is checked up front
+ * because a stream already destroyed won't emit a fresh 'close' for a
+ * listener attached after the fact, and `EventEmitter` never replays past events.
  */
 function waitForDrain(stream: StreamSink): Promise<void> {
   if (stream.destroyed) return Promise.reject(new StreamSinkClosed())
@@ -104,13 +72,9 @@ function waitForDrain(stream: StreamSink): Promise<void> {
     const onError = (err: unknown) => {
       stream.off('drain', onDrain)
       stream.off('close', onClose)
-      // See `isSinkAbortedByReader` above: this specific error is the
-      // consumer walking away, arriving here as 'error' (always, and always
-      // *before* 'close' — confirmed empirically, not just in the odd case),
-      // not a genuine write failure. Rejecting with the real error here
-      // would otherwise be indistinguishable, downstream, from an actual
-      // failure — `_stream()`'s catch block only knows to swallow a
-      // `StreamSinkClosed`.
+      // Per `isSinkAbortedByReader` above: this is the consumer walking
+      // away (always arrives as 'error', before 'close'), not a genuine
+      // write failure — `_stream()`'s catch only swallows `StreamSinkClosed`.
       reject(isSinkAbortedByReader(err) ? new StreamSinkClosed() : err)
     }
     const onClose = () => {
@@ -124,16 +88,14 @@ function waitForDrain(stream: StreamSink): Promise<void> {
   })
 }
 
-// Static imports (not `createRequire`) so these paths are visible to the
-// bundler and a resolution failure surfaces at import time.
+// Static imports (not `createRequire`) so the bundler can follow these
+// paths and a resolution failure surfaces at import time.
 //
-// Known limitation: each dialect class builds its own internal `Logger`,
-// and that instance's `colorette` dependency fails to resolve under this
-// project's vitest-pool-workers test harness — any `logger.warn/error/
-// deprecate` call inside a dialect constructor throws ("Cannot read
-// properties of undefined (reading 'red')"). Not fixable from here;
-// `initializeDriver()` and the sqlite defaults below instead avoid ever
-// calling into that path.
+// Known limitation: each dialect class builds its own `Logger`, whose
+// `colorette` dependency fails to resolve under vitest-pool-workers, so any
+// `logger.warn/error/deprecate` call inside a dialect constructor throws.
+// Not fixable from here; `initializeDriver()` and the sqlite defaults below
+// avoid that path.
 const DIALECT_CLASSES: Record<Dialect, unknown> = {
   mysql: Client_MySQL2,
   postgres: Client_PG,
@@ -151,20 +113,16 @@ function loadDialect(dialect: Dialect): new (...args: never[]) => unknown {
 }
 
 const DEFAULT_LOG = {
-  // Plain console, not colorette-colored: no TTY to render ANSI codes here,
-  // and colorette isn't reliable to resolve in this harness (see above).
+  // Plain console: no TTY here, and colorette isn't reliable in this harness (see above).
   warn: (message: string) => console.warn(message),
   error: (message: string) => console.error(message),
   deprecate: (message: string) => console.warn(message),
 }
 
-// `loadDialect` deliberately types the base dialect class's instance as
-// `unknown` — this file otherwise never calls an inherited member by name,
-// so there is nothing to type-check against. `destroy()`, `transaction()`
-// and `prepBindings()` below are the exceptions: each calls the matching
-// `super.*()` to reuse knex's own base behavior, so the instance type is
-// refined with just those three members typed (an intersection keeps every
-// other inherited member available as `unknown`, same as before).
+// `loadDialect` types the base instance as `unknown` since nothing else
+// here calls an inherited member by name. `destroy()`, `transaction()` and
+// `prepBindings()` below are exceptions — each calls `super.*()` — so those
+// three are typed explicitly; everything else stays `unknown`.
 type KnexClientInstance = Record<string, unknown> & {
   destroy(callback?: (err?: unknown) => void): Promise<void>
   transaction(container: unknown, config?: unknown, outerTx?: unknown): unknown
@@ -176,35 +134,26 @@ const MIGRATION_ACCESSORS = [
   ['seed', 'db.seed'],
 ] as const
 
-// Deliberately does not blame "no filesystem" here: that is true of knex's
-// *default* migration/seed sources, but a caller-supplied `migrationSource`/
-// `seedSource` reads nothing off disk, and this getter throws before either
-// one is ever consulted -- the actual, verified cause (see the module doc
-// comment above `hardenMigrationAccessors`) is knex's own `browser` field
-// substitution, which real wrangler/esbuild honours regardless of source.
-//
-// Nor does it name the driver. The substitution happens when the Worker is
-// bundled, before any driver is chosen, so this fails identically on all
-// five -- attributing it to whichever one the caller picked would send them
-// to change the single thing that cannot help.
+// The real cause (see `hardenMigrationAccessors` below) is knex's own
+// `browser` field substitution, which wrangler/esbuild honour regardless of
+// migration/seed source — not "no filesystem" (a caller-supplied
+// `migrationSource`/`seedSource` never touches disk, yet still throws), and
+// not any one driver (the substitution happens at bundle time, before a
+// driver is chosen, so it hits all five identically).
 const MIGRATION_UNAVAILABLE_HINT =
   "knex's own package.json 'browser' field maps Migrator/Seeder to a no-op, and real wrangler/esbuild honours that field when bundling for Workers, so this getter cannot construct a real one here. Run migrations/seeds from your own tooling against the database directly instead: `wrangler d1 migrations` for D1, the Turso/libsql CLI, or a plain Node knex process against Postgres/MySQL — never from inside the Worker."
 
 /**
- * Redefines `migrate`/`seed` on `target` (an already-built knex instance, or
- * anything carrying the same accessor shape) so a `TypeError` escaping the
- * original getter comes back out as a `CfKnexError` (code
- * `UNSUPPORTED_CAPABILITY`) naming the capability, instead of an
- * unattributable `TypeError: Migrator is not a constructor`. The original
- * getter is still called first — where it resolves to a real class (Node,
- * and this project's own `workers` vitest pool, see
- * test/unit/migrate.test.ts), `db.migrate`/`db.seed` keep working exactly as
- * before. Mutates `target` in place. Exported only so its own unit tests can
- * drive it directly against a plain object standing in for the getter that
- * throws: `@cloudflare/vitest-pool-workers` does not honour knex's
- * `package.json` `browser` field the way real wrangler/esbuild does, so the
- * substitution that makes the real getter throw cannot be reproduced from a
- * test in this repo.
+ * Redefines `migrate`/`seed` on `target` so a `TypeError` escaping the original getter
+ * comes back as a `CfKnexError` (`UNSUPPORTED_CAPABILITY`) naming the capability, instead
+ * of an unattributable `TypeError: Migrator is not a constructor`. The original getter
+ * runs first, so where it resolves to a real class (Node, and this project's own `workers`
+ * vitest pool), `db.migrate`/`db.seed` still work. Mutates `target` in place.
+ *
+ * Exported for its own unit tests, which drive it against a plain object:
+ * `@cloudflare/vitest-pool-workers` doesn't honour knex's `browser` field the way real
+ * wrangler/esbuild does, so the throwing getter it causes can't be reproduced from a test
+ * in this repo.
  */
 export function hardenMigrationAccessors(target: object): void {
   for (const [prop, capability] of MIGRATION_ACCESSORS) {
@@ -231,30 +180,21 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
   adapter: DriverAdapter,
   knexOptions: Record<string, unknown> = {},
 ): KnexType<TRecord, TResult> {
-  // `config: Record<string, unknown>` here (not `never[]`, what `loadDialect`
-  // itself returns) because `resolvedConfig` below is now passed straight
-  // into `new CfKnexClient(resolvedConfig)` — this file's own replacement
-  // for what knex's `Knex()` factory used to do internally.
+  // `config: Record<string, unknown>` (not `loadDialect`'s own `never[]`)
+  // since `resolvedConfig` below is passed straight into `new CfKnexClient(...)`.
   const Base = loadDialect(adapter.dialect) as new (config: Record<string, unknown>) => KnexClientInstance
 
   class CfKnexClient extends Base {
-    // knex's base Client constructor calls this whenever `config.connection`
-    // is truthy, and each dialect's implementation tries to `require()` the
-    // real native driver package (mysql2/pg/sqlite3) — unavailable in
-    // workerd and unnecessary, since `adapter` supplies connections instead.
-    // Nothing below reads `this.driver`, so no-opping this is safe.
+    // Each dialect's base implementation `require()`s the real native driver package
+    // (mysql2/pg/sqlite3) — unavailable in workerd and unnecessary, since `adapter` supplies
+    // connections instead. Nothing below reads `this.driver`, so no-opping this is safe.
     initializeDriver() {}
 
-    // Deliberately NOT overriding `acquireConnection` / `releaseConnection`
-    // (knex's higher-level, per-query API): the base `Client` implementation
-    // of those two calls `this.pool.acquire()` / `this.pool.release()`,
-    // which is exactly what makes knex's tarn pool real. Overriding them
-    // directly — this project's first attempt — calls straight into
-    // `adapter` once per query and bypasses tarn entirely, so the pool
-    // never tracks a handle and never reaps it; see `DriverAdapter`'s doc
-    // comment in ./types.ts for the fallout that caused. Overriding the
-    // lower-level hooks below instead lets tarn own pooling and only calls
-    // into `adapter` when tarn itself decides to create or evict a handle.
+    // Deliberately NOT overriding `acquireConnection`/`releaseConnection`: the base `Client`
+    // implementation calls `this.pool.acquire()`/`release()`, what makes tarn's pool real.
+    // Overriding them directly instead — tried first — bypasses tarn entirely, so the pool
+    // never tracks or reaps a handle (see `DriverAdapter`'s doc comment in ./types.ts). The
+    // hooks below let tarn own pooling and call `adapter` only when it creates/evicts a handle.
 
     async acquireRawConnection() {
       return adapter.acquire()
@@ -264,63 +204,33 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       await adapter.release(handle)
     }
 
-    // knex's stock mysql2 dialect implements this as `connection &&
-    // !connection._fatalError && !connection._protocolError &&
-    // !connection._closing && !connection.stream.destroyed`
-    // (node_modules/knex/lib/dialects/mysql2/index.js) — it assumes the
-    // pooled handle is always a live mysql2 socket with those exact fields.
-    // That is not true in general: `adapter` owns the handle, and for the
-    // tidb-http/d1/libsql adapters this same class is reused for, it may not
-    // have any of them. Reading `.stream.destroyed` on one of those handles
-    // would throw (not just return false), which tarn would treat as
-    // "invalid, discard immediately" — silently defeating pooling on every
-    // acquire. Handle
-    // liveness is genuinely the adapter's concern, not the pool's — but
-    // "the adapter's concern" has to mean something the adapter can act on,
-    // not just a comment here promising it does: `DriverAdapter.validate`
-    // (src/core/types.ts) is the hook for that. Delegate to it when an
-    // adapter implements it (a handle that can go stale between queries,
-    // e.g. mysql2's TCP connection, needs this to avoid the pool handing
-    // out a connection MySQL already killed server-side); default to always
-    // valid when it doesn't (HTTP-backed and binding-backed handles can't go
-    // stale this way, and knex's own stricter default would wrongly discard
-    // them).
+    // knex's stock mysql2 dialect checks fields specific to a live mysql2 socket
+    // (`connection._fatalError`, `.stream.destroyed`, etc). Those don't exist on every
+    // handle `adapter` may hand back (e.g. tidb-http/d1/libsql), so reading them would
+    // throw and tarn would discard a valid connection on every acquire. Delegate to
+    // `DriverAdapter.validate` (src/core/types.ts) when implemented — needed for handles
+    // that can go stale between queries, e.g. mysql2's TCP connection — default to
+    // always valid otherwise.
     validateConnection(handle: unknown): boolean {
       return adapter.validate ? adapter.validate(handle) : true
     }
 
-    // knex's own hook (node_modules/knex/lib/client.js's base `Client`),
-    // deliberately rather than this project's `_query()` below. Converting
-    // in `_query()` would reach every query that runs today — `db.raw()`
-    // included, since `client.query()` calls `enrichQueryObject()` (which
-    // calls `prepBindings`) and then `_query()` — but it would convert too
-    // late to be seen anywhere else, and not at all on paths that skip
-    // `_query()`. `prepBindings` runs before the `query` event is emitted
-    // and before a failed query's SQL is interpolated into its error
-    // message, so both report the values actually sent; and
-    // `client.stream()` reaches `enrichQueryObject()` then `_stream()`,
-    // never `_query()`, so a sqlite-family adapter that ever declares
-    // `capabilities.streaming` gets this for free (both do declare `false`
-    // today, so that half is not yet reachable).
+    // knex's own hook (base `Client`), not `_query()` below: converting there would miss
+    // `client.stream()`, which reaches `enrichQueryObject()` (and thus `prepBindings`) then
+    // `_stream()`, never `_query()` — relevant once a sqlite-family adapter declares
+    // `capabilities.streaming`. It also runs before the `query` event and before a failed
+    // query's SQL is interpolated into its error, so both see the values actually sent.
     //
-    // sqlite-only, and only `Date`/boolean: the base `Client.prepBindings`
-    // is a plain passthrough, and knex's own sqlite3 dialect never overrides
-    // it — only `Client_BetterSQLite3._formatBindings` (node_modules/knex/lib/
-    // dialects/better-sqlite3/index.js) converts these two types, the same
-    // way below. Matching that conversion instead of inventing a different
-    // one is what lets a knex + better-sqlite3 codebase migrate to any
-    // sqlite-family adapter here (D1, libsql, Turso) without its stored
-    // values changing shape. mysql2 and pg accept `Date`/boolean natively
-    // and encode them correctly for their own column types — converting a
-    // `Date` to a number there would corrupt every timestamp column — so
-    // every other dialect falls straight through to the base passthrough.
+    // sqlite-only, `Date`/boolean only: the base `prepBindings` is a plain passthrough, and
+    // knex's sqlite3 dialect never overrides it — only `Client_BetterSQLite3._formatBindings`
+    // converts these two types, the same way below, letting a knex + better-sqlite3 codebase
+    // migrate to any sqlite-family adapter here without its stored values changing shape.
+    // mysql2/pg accept `Date`/boolean natively — converting would corrupt timestamp columns —
+    // so every other dialect falls through.
     prepBindings(bindings: unknown[]): unknown[] {
       if (adapter.dialect !== 'sqlite') return super.prepBindings(bindings)
-      // Carried over verbatim from `_formatBindings`. No knex path this
-      // project exercises reaches here with anything but an array — proven
-      // by throwing on a non-array here and running the whole suite, which
-      // stayed green — so it is unreachable today rather than a guard some
-      // test covers.
+      // Carried over from `_formatBindings`. No path this project exercises reaches here
+      // with a non-array — verified by throwing on non-array and running the suite green.
       if (!bindings) return []
       return bindings.map((binding) => {
         if (binding instanceof Date) return binding.valueOf()
@@ -334,97 +244,48 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       return toKnexResponse(adapter.dialect, raw, obj)
     }
 
-    // `adapter.capabilities.streaming` on its own is only a claim; `adapter.
-    // stream` existing is the proof. Gating on both is what stops a
-    // future adapter that sets the flag without ever implementing the
-    // method from reaching `adapter.stream(...)` below and crashing on
-    // "not a function" instead of failing with this file's own typed error
-    // (see src/core/types.ts's `DriverAdapter.stream` doc — this is the
-    // same reasoning `validateConnection` above already applies to
-    // `adapter.validate`).
+    // `capabilities.streaming` alone is a claim; `adapter.stream` existing is the proof —
+    // gating on both stops a future adapter that sets the flag without implementing the
+    // method from crashing on "not a function" instead of failing with this file's typed
+    // error (same reasoning as `validateConnection`'s `adapter.validate` check above).
     //
-    // Must return a Promise that genuinely settles on the outcome of the
-    // stream, not merely a Promise that always resolves once some async work
-    // runs: knex's own postgres `_stream` (node_modules/knex/lib/dialects/
-    // postgres/index.js) — the contract this matches — resolves on
-    // completion, rejects on error, and emits on the stream in the error
-    // case as well, all three. A version that only ever resolves (or only
-    // ever emits on the stream without also rejecting) would let a caller
-    // who `await`s `db(t).stream()`'s returned promise (or a `.stream()`
-    // callback's own return value) see success on a stream that actually
-    // failed partway through.
+    // Must return a Promise that genuinely settles on the stream's outcome (resolves on
+    // completion, rejects on error, emits on the stream in the error case too), matching
+    // knex's own postgres `_stream` contract — otherwise a caller `await`-ing `.stream()`'s
+    // promise could see success on a stream that actually failed.
     //
-    // Whether that promise settling promptly actually keeps the pooled
-    // connection held for exactly this long, though, depends on which of
-    // knex's *two* independent release paths gets there first — this method
-    // only controls one of them, and which path is even reachable differs
-    // outside vs. inside `db.transaction()`.
-    //
-    // Outside a transaction: `Runner.ensureConnection`'s own `finally {
-    // await this.client.releaseConnection(...) }` (node_modules/knex/lib/
-    // execution/runner.js) does genuinely await this method's returned
-    // promise before releasing. But `Runner.stream()` also independently
-    // registers `stream.on('close', () => this.client.releaseConnection(...))`
-    // on the output Transform *at creation time* — this fires the instant a
-    // consumer stops early (a `break` inside `for await`, which destroys the
-    // Transform), with no dependency on this method's promise at all. Both
-    // of those calls reach the same real, base client, so either one can
-    // genuinely return the pooled connection to the pool while this method's
-    // own cleanup is still running.
-    //
-    // Inside `db.transaction()`, the picture is different, not just "the
-    // first path doesn't apply": query builders built from `trx(...)` run
-    // against `trxClient`, not the base client (`makeTransactor(trx,
-    // connection, trxClient)` → `makeKnex(trxClient)`), and `makeTxClient`
-    // (node_modules/knex/lib/execution/transaction.js) overrides
-    // `trxClient.releaseConnection` with a no-op (`() => Promise.resolve()`).
-    // So the *same* `stream.on('close', ...)` handler still fires on an early
-    // exit inside a transaction, but the call it makes resolves immediately
-    // without touching the pool, since `this.client` there is `trxClient`.
-    // That does not make a transaction's connection immune to a premature
-    // release, though: `Transaction.prototype.acquireConnection`'s own
-    // `finally` block calls the *real* base client's `releaseConnection`
-    // once the transaction callback's promise settles and commit/rollback
-    // has fully resolved — independently of whether some other, unawaited,
-    // overlapping `stream()` call on that same transaction is still
-    // mid-cleanup. A driver adapter whose own `stream()` cleanup can still be
-    // issuing queries after an early exit (src/adapters/pg.ts's cursor
-    // teardown, for instance) has to defend against both of these — the
-    // non-transactional Transform-'close' race and this narrower
-    // transactional one — the same way, because both ultimately call the
-    // real client's `releaseConnection`; see src/adapters/pg.ts's
-    // `handlesMidTeardown` comment for how it does that.
+    // That settling doesn't fully control how long the connection stays held: knex has two
+    // independent release paths. Outside a transaction, `Runner.ensureConnection`'s `finally`
+    // awaits this method, but `Runner.stream()` also releases on the output Transform's
+    // 'close' event at creation time, firing the instant a consumer breaks early, independent
+    // of this method's promise. Inside a transaction, query builders run against `trxClient`,
+    // whose `releaseConnection` is a no-op (`makeTxClient`), so that same 'close' handler
+    // touches nothing — the real release happens in
+    // `Transaction.prototype.acquireConnection`'s `finally` instead, regardless of any
+    // unawaited `stream()` still mid-cleanup on that transaction. An adapter whose `stream()`
+    // cleanup can issue queries after an early exit (src/adapters/pg.ts's cursor teardown)
+    // must defend against both races, since both ultimately call `releaseConnection`; see
+    // pg.ts's `handlesMidTeardown` comment.
     _stream(handle: unknown, obj: Record<string, unknown>, stream: StreamSink): Promise<void> {
       if (!adapter.capabilities.streaming || !adapter.stream) {
         throw CfKnexError.unsupported(adapter.driver, 'streaming', adapter.hints?.streaming ?? 'Use .limit()/.offset() to paginate.')
       }
-      // Both stock dialects this adapter's streaming replaces guard this
-      // identically — node_modules/knex/lib/dialects/postgres/index.js's
-      // `_stream` and node_modules/knex/lib/dialects/mysql/index.js's
-      // `_stream` (the mysql2 dialect inherits it unchanged) both open with
-      // `if (!obj.sql) throw new Error('The query is empty')` — a
-      // synchronous throw, not a rejected promise. knex's own
-      // `ensureConnectionStreamCallback` (node_modules/knex/lib/execution/
-      // internal/ensure-connection-callback.js) wraps the call this method
-      // is reached through in a try/catch specifically to turn a synchronous
-      // throw here into a `stream.emit('error', …)` plus a normal rejection,
-      // so matching the stock dialects' exact shape (rather than inventing a
-      // resolved-promise no-op instead) is what stays inside that already-
-      // handled path.
+      // Both stock dialects this replaces guard identically: postgres's and mysql2's
+      // `_stream` (node_modules/knex/lib/dialects/{postgres,mysql}/index.js) throw
+      // synchronously on `!obj.sql`, not reject. knex's own `ensureConnectionStreamCallback`
+      // wraps this call in a try/catch that turns a synchronous throw into
+      // `stream.emit('error', …)` plus a rejection — matching that shape keeps this inside
+      // that already-handled path.
       if (!obj.sql) throw new Error('The query is empty')
 
       const rows = adapter.stream(handle, obj.sql as string, (obj.bindings as unknown[]) ?? [])
       return (async () => {
         try {
           for await (const row of rows) {
-            // A `false` return means the sink's internal buffer is full and
-            // it has not caught up — writing the next row anyway (the
-            // original draft of this method did) buffers the entire result
-            // set in `stream`'s own memory the moment the consumer falls
-            // behind for even one row, which defeats the only reason to
-            // stream in the first place. `waitForDrain` also resolves the
-            // race the other way (the sink closing instead of draining) so
-            // this can never hang forever on a consumer that already left.
+            // A `false` return means the sink's buffer is full — writing the next row
+            // anyway (the original draft did) buffers the whole result set in memory once
+            // the consumer falls behind, defeating streaming. `waitForDrain` also resolves
+            // the sink-closes-instead-of-drains race, so this can't hang on a departed consumer.
             if (!stream.write(row)) await waitForDrain(stream)
           }
           stream.end()
@@ -436,21 +297,16 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       })()
     }
 
-    // knex's own `Client.transaction()` (node_modules/knex/lib/client.js)
-    // has no notion of `adapter.capabilities` and will happily hand back a
-    // `Transaction` that issues BEGIN/COMMIT/ROLLBACK as ordinary queries
-    // through `_query()` above — for an adapter that cannot guarantee those
-    // three statements land on the same underlying session (declared via
-    // `capabilities.transactions: false`), that is the worst possible
-    // failure: writes appear to succeed and a rollback silently commits
-    // instead. Gate it here, the same way `_stream()` above gates streaming.
+    // knex's base `Client.transaction()` has no notion of `adapter.capabilities` and will
+    // happily issue BEGIN/COMMIT/ROLLBACK as ordinary queries even when the adapter can't
+    // guarantee they land on the same session (`capabilities.transactions: false`) — writes
+    // appear to succeed and a rollback silently commits. Gate it here, same as `_stream()`
+    // gates streaming above.
     //
-    // This must return a *rejected Promise*, not throw synchronously: knex's
-    // `make-knex.js` `_transaction()` returns whatever this method produces
-    // directly and unwrapped whenever a callback container is passed (the
-    // common `db.transaction(async trx => {...})` shape) — a synchronous
-    // throw here would escape as a thrown exception instead of the rejected
-    // promise callers `await`/`.catch()`/`expect(...).rejects` expect.
+    // Must return a *rejected Promise*, not throw synchronously: make-knex.js's
+    // `_transaction()` returns this method's result unwrapped for the common
+    // `db.transaction(async trx => {...})` shape — a synchronous throw would escape as an
+    // exception instead of the rejected promise callers `await`/`.catch()` expect.
     transaction(container: unknown, config?: unknown, outerTx?: unknown): unknown {
       if (!adapter.capabilities.transactions) {
         return Promise.reject(
@@ -465,32 +321,17 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       return super.transaction(container, config, outerTx)
     }
 
-    // knex's own `Client.destroy()` only tears down the pool — which, now
-    // that acquire/destroy are wired to real tarn hooks above, does mean
-    // every handle tarn still holds gets a `destroyRawConnection` /
-    // `adapter.release()` call. But `Client.destroy()` has no notion of
-    // `adapter`, so without this override `knex.destroy()` would never
-    // reach `adapter.destroy()` and any adapter-level state that outlives
-    // individual handles (e.g. src/adapters/mysql2.ts's own bookkeeping)
-    // would go untorn-down. `knex.destroy(callback)` (make-knex.js) calls
-    // `this.client.destroy(callback)` directly and polymorphically, so
-    // overriding `destroy` here is reached the same way the overrides above
-    // are. `super.destroy()` first reuses the base pool-teardown sequence
-    // (including its own `_ownsPool` guard) before `adapter.destroy()` runs.
+    // Base `Client.destroy()` only tears down the pool (which, via the tarn hooks above,
+    // calls `destroyRawConnection`/`adapter.release()` per handle) — it has no notion of
+    // `adapter` itself, so without this override `adapter.destroy()` and state outliving
+    // individual handles (e.g. src/adapters/mysql2.ts's bookkeeping) would go untorn-down.
+    // `super.destroy()` runs the base teardown first, then `adapter.destroy()`.
     //
-    // But `this` is not always the real client: knex's transaction machinery
-    // (execution/transaction.js's `makeTxClient`) builds a *transactor*
-    // client via `Object.create(client.constructor.prototype)` — sharing
-    // this exact prototype, so `trx.destroy()` resolves to this same method
-    // — and marks it with an own `transacting: true` property the real
-    // client never has. That transactor has no pool of its own (`super.destroy()`
-    // already no-ops for it, since its inherited `this.pool` is `undefined`),
-    // but without the guard below nothing stops `adapter.destroy()` from
-    // running anyway: calling `trx.destroy()` inside a transaction would
-    // tear down every connection the *adapter* holds, including the one the
-    // transaction itself is still using to COMMIT — breaking the parent
-    // `db` permanently, not just the transaction. Guard it the same way
-    // knex's own pool implicitly does for itself.
+    // `this` isn't always the real client: knex's transaction machinery (`makeTxClient`)
+    // builds a *transactor* sharing this prototype, marked `transacting: true` — so
+    // `trx.destroy()` reaches this method too. `super.destroy()` already no-ops for it
+    // (no pool of its own), but without the guard below `adapter.destroy()` would still
+    // tear down every connection the adapter holds, including the one COMMIT is still using.
     async destroy(callback?: (err?: unknown) => void): Promise<void> {
       if ((this as unknown as { transacting?: boolean }).transacting) {
         if (typeof callback === 'function') callback()
@@ -507,59 +348,37 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     }
   }
 
-  // sqlite3's own constructor warns (see the module comment above) unless
-  // `connection.filename` and `useNullAsDefault` are already set. `filename`
-  // is never opened — `adapter` owns the real connection — and
-  // `useNullAsDefault: true` is standard, harmless knex practice regardless.
+  // sqlite3's constructor warns (see above) unless `connection.filename` and
+  // `useNullAsDefault` are already set. `filename` is never opened — `adapter` owns the connection.
   const dialectDefaults: Record<string, unknown> = adapter.dialect === 'sqlite' ? { useNullAsDefault: true } : {}
-  // ':memory:' satisfies the check above only — knex never actually opens
-  // it, since `adapter` (not knex) owns the connection.
+  // ':memory:' satisfies the check above only; knex never opens it.
   const connectionDefault: Record<string, unknown> = adapter.dialect === 'sqlite' ? { filename: ':memory:' } : {}
 
-  // Overrides knex's inherited pool default (`min: 2, max: 10`). This
-  // library's documented usage pattern is a fresh client per request, never
-  // one cached in a module-level global — Hyperdrive already pools
-  // server-side, and reusing a cached knex/socket object across requests
-  // throws workerd's "Cannot perform I/O on behalf of a different request".
-  // tarn only ever creates connections to satisfy actual pending acquires
-  // (`_shouldCreateMoreResources`, node_modules/.pnpm/tarn@3.1.2's
-  // Pool.js), so `min: 2` does NOT mean two connections open eagerly up
-  // front — a single query against a `min: 2` pool still opens exactly one.
-  // The real problem is what happens to that one connection afterward: it
-  // is never reclaimed. tarn's reap arithmetic (`maxDestroy = free.length -
-  // (min - used.length)`, from the same `check()`) is ≤ 0 whenever at most
-  // `min` connections are sitting idle, so the idle-timeout reaper never
-  // fires on them. With a fresh client per request and `min: 2`, the one
-  // connection that request's query opened is pinned open for the rest of
-  // that client's lifetime instead of being reclaimable — exactly backwards
-  // for a client that's about to be destroyed at the end of the request
-  // anyway. `min: 0` removes that floor entirely, so an idle connection is
-  // always eligible for reaping; `max: 5` is a modest per-client ceiling,
-  // not a promise every adapter/database combination can sustain
-  // concurrently.
+  // Overrides knex's inherited pool default (`min: 2, max: 10`). This library's usage
+  // pattern is a fresh client per request, never a cached module-level global (Hyperdrive
+  // pools server-side; reusing a cached knex object across requests throws workerd's
+  // "Cannot perform I/O on behalf of a different request"). tarn only opens connections to
+  // satisfy pending acquires (`_shouldCreateMoreResources`, tarn's Pool.js), so `min: 2`
+  // doesn't open two eagerly — but tarn's reap arithmetic (`maxDestroy = free.length - (min
+  // - used.length)`) never fires while at most `min` connections sit idle, so the one
+  // connection a request opens is pinned open for that client's whole lifetime instead of
+  // reclaimable — backwards for a client about to be destroyed anyway. `min: 0` removes
+  // that floor; `max: 5` is a modest per-client ceiling, not a promise every
+  // adapter/database can sustain concurrently.
   const poolDefault: Record<string, unknown> = { pool: { min: 0, max: 5 } }
 
-  // `client` must always be `CfKnexClient` (a caller-supplied one would
-  // defeat this function), and `connection`/`log` must merge with their
-  // defaults rather than replace them (an incomplete caller `connection`
-  // would otherwise reintroduce the sqlite crash above) — handled
-  // explicitly below rather than by spread order. `pool` and everything
-  // else override freely: a caller-supplied `pool` (already passed through
-  // via this same `restOptions` spread today) fully replaces `poolDefault`
-  // above it, exactly like `dialectDefaults`.
+  // `connection`/`log` must merge with their defaults, not replace them (an incomplete
+  // caller `connection` would reintroduce the sqlite crash above) — handled explicitly
+  // below rather than by spread order. `pool` and everything else override freely via `restOptions`.
   const { connection: callerConnection, log: callerLog, ...restOptions } = knexOptions as Record<string, unknown> & {
     connection?: Record<string, unknown>
     log?: Record<string, unknown>
   }
 
-  // Mirrors what `knex/lib/knex-builder/Knex.js`'s factory function does
-  // with the config it resolves (`makeKnex(new Dialect(resolvedConfig))`,
-  // plus copying `userParams` onto the result) — minus `resolveConfig`
-  // itself, which this call has no use for: it exists to turn a
-  // `client`/`dialect` *string* into a class via `knex/lib/dialects`, and
-  // `CfKnexClient` is already a class. Constructing it directly is what
-  // keeps that lookup, and the bundler-hostile import it requires, out of
-  // the graph entirely.
+  // Mirrors knex's own factory (`makeKnex(new Dialect(resolvedConfig))` plus copying
+  // `userParams`), minus `resolveConfig` itself — that exists only to turn a
+  // `client`/`dialect` string into a class via `knex/lib/dialects`, which `CfKnexClient`
+  // already is. Constructing it directly keeps that lookup, and its bundler-hostile import, out of the graph.
   const resolvedConfig = {
     ...dialectDefaults,
     ...poolDefault,

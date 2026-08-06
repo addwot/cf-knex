@@ -3,142 +3,90 @@ import type { DriverAdapter, RawResult } from '../core/types'
 import type { Client, InArgs, IntMode, ResultSet, Transaction, TransactionMode } from '@libsql/client'
 
 /**
- * `intMode` passes straight through to `@libsql/client`'s own `Config.intMode`
- * (`node_modules/@libsql/core`'s `api.d.ts`) and defaults to whatever
- * `createClient` itself defaults to when omitted — `"number"` — rather than
- * this adapter picking a different default. That default has a real
- * limitation worth knowing before hitting it in production: this project's
- * `RawResult.insertId` already carries a written row's `lastInsertRowid` as a
- * `bigint` regardless of `intMode` (see `toRawResult`'s doc comment below),
- * but *reading that same column back* in a later `SELECT` does not get the
- * same treatment — under the default `"number"` mode, `@libsql/hrana-client`
- * decodes any integer *column value* above `Number.MAX_SAFE_INTEGER` into a
- * bare `RangeError` ("Received integer which is too large to be safely
- * represented as a JavaScript number"), not a `CfKnexError`. Confirmed live:
- * inserting id `9007199254740995n` (`2^53 + 3`) against the docker container
- * round-trips correctly through `lastInsertRowid`, but `SELECT id FROM …`
- * for that same row throws exactly that `RangeError` with the default
- * `intMode`, and returns `9007199254740995n` cleanly with `intMode: 'bigint'`.
- * Changing this adapter's *default* to `'bigint'` was considered and
- * rejected — it would turn every ordinary integer column into a `bigint` for
- * every caller, a worse trade for the common case than leaving a sharp edge
- * documented for the uncommon one. Pass `intMode: 'bigint'` (or `'string'`)
- * here if the schema has integer columns that can exceed 2^53.
+ * `intMode` passes through to `@libsql/client`'s `Config.intMode`, defaulting to
+ * `"number"` when omitted like `createClient` itself. `RawResult.insertId` always
+ * carries `lastInsertRowid` as a `bigint` regardless of `intMode` (see `toRawResult`
+ * below), but reading that column back in a later `SELECT` does not: under the default
+ * `"number"` mode, `@libsql/hrana-client` throws a bare `RangeError` (not
+ * `CfKnexError`) for any value above `Number.MAX_SAFE_INTEGER`. Confirmed live:
+ * inserting `9007199254740995n` round-trips fine through `lastInsertRowid`, but reading
+ * it back throws with the default `intMode` and returns cleanly with `intMode:
+ * 'bigint'`. The default is kept as `"number"` since promoting every integer column
+ * would be a worse trade for the common case. Pass `intMode: 'bigint'` (or `'string'`)
+ * if the schema has columns that can exceed 2^53.
  */
 export type LibsqlAdapterOptions = { url: string; authToken?: string; intMode?: IntMode }
 
 /**
  * A `DriverAdapter` over `@libsql/client` 0.17.4, for Turso and any other
- * libsql-server-compatible endpoint reached over `http:`/`https:` (`libsql:`
- * URLs normalize to one of those two — `@libsql/core/config`'s
- * `expandConfig`, shared by every build below). Only the HTTP client has
- * been read and verified end to end against a live server (the
- * `docker-compose.yml` `libsql` service, and what Turso itself speaks); the
- * `ws:`/`wss:` client has been read and partially verified — proven to
- * execute real queries end-to-end and to reconnect transparently after a
- * dropped socket (see the "No `validate()`" comment below, near `execute()`,
- * for exactly what that covered) — but not exercised by this project's own
- * conformance suite the way the HTTP path has been.
+ * libsql-server-compatible endpoint reached over `http:`/`https:` (`libsql:` URLs
+ * normalize to one of those two in `@libsql/core/config`'s `expandConfig`). Only the
+ * HTTP client has been verified end to end against a live server (the
+ * `docker-compose.yml` `libsql` service, and what Turso speaks); the `ws:`/`wss:`
+ * client has been verified to run real queries and reconnect transparently after a
+ * dropped socket (see the "No `validate()`" comment near `execute()` below) but not
+ * exercised by this project's conformance suite the way HTTP has.
  *
- * `@libsql/client` ships more than one build, and which one a given
- * `import('@libsql/client')` resolves to depends on the *consumer's*
- * bundler/runtime, not on anything this adapter controls — its own
- * `package.json` `exports` map (`node_modules/@libsql/client/package.json`)
- * picks `lib-esm/web.js` under a `workerd` condition (a real Cloudflare
- * Workers deployment of a project using this adapter) and `lib-esm/node.js`
- * under `node`/`default` (this project's own `node` vitest project, and any
- * plain-Node consumer). The two builds do not agree on which URL schemes are
- * even reachable: `node.js`'s `_createClient` sends anything that isn't
- * `ws(s):`/`http(s):` to a local-file sqlite3 client, while `web.js`'s
- * `_createClient` throws `LibsqlError` (`URL_SCHEME_NOT_SUPPORTED`) for
- * everything except `ws(s):`/`http(s):` — there is no local-file client in
- * the Workers-targeted build at all (workerd has no filesystem for it to
- * open). Neither local-file path is exercised or claimed correct by
- * anything below; a Workers deployment of this adapter can only ever reach
+ * `@libsql/client`'s `exports` map picks `lib-esm/web.js` under `workerd` (a real
+ * Workers deployment) and `lib-esm/node.js` under `node`/`default` (this project's own
+ * vitest, and any plain-Node consumer); the two disagree on which URL schemes are
+ * reachable (`node.js` falls back to a local-file sqlite3 client, `web.js` throws
+ * `LibsqlError` instead, since workerd has no filesystem) — neither local-file path is
+ * exercised here, and a Workers deployment of this adapter can only ever reach
  * `ws(s):`/`http(s):` regardless.
  *
  * ## One `Client` per `acquire()`, closed on `release()` — never shared
  *
- * `src/core/types.ts`'s `DriverAdapter` doc is explicit about what these
- * hooks mean once wired into knex's tarn pool via `acquireRawConnection`/
- * `destroyRawConnection` (`src/core/client.ts`): `acquire()` must hand back a
- * new handle every call, and `release(handle)` permanently closes the one
- * handle it was given — tarn calls it only when evicting a resource for
- * good, never to hand the same handle to a second caller. A single shared
- * `Client`, returned by every `acquire()` with `release()` a no-op (an
- * earlier draft of this file, and the shape two other adapters in this
- * project already shipped as a Critical defect), is wrong here for a
- * structural reason, not just a style one: the first time tarn evicts *any*
- * one of the handles it believes are independent, `release()` would call
- * `.close()` on the one `Client` every other still-pooled handle secretly
- * *is* — killing all of them, not just the one being evicted. `createClient`
- * being cheap (see `acquire()`'s own comment below for exactly how cheap,
- * confirmed by instrumenting `fetch` rather than assumed) removes the only
- * reason that might have justified sharing anyway.
+ * `src/core/types.ts`'s `DriverAdapter` doc requires `acquire()` to hand back a new
+ * handle every call, and `release(handle)` to permanently close the one handle it was
+ * given — tarn never hands the same handle to a second caller. A single shared `Client`
+ * with `release()` a no-op is wrong structurally: the first time tarn evicts any one
+ * handle it believes is independent, `release()` would `.close()` the one `Client`
+ * every other pooled handle secretly *is*, killing all of them. `createClient` being
+ * cheap (see `acquire()`'s comment below) removes the only reason sharing might have
+ * been justified.
  *
  * ## Streaming
  *
- * `capabilities.streaming` is `false`: `Client.execute()`
- * (node_modules/@libsql/client/lib-esm/http.js) always resolves a complete,
- * fully-buffered `ResultSet` — `const rowsResult = await rowsPromise; return
- * resultSetFromHrana(rowsResult)` — and the package exposes no cursor or
- * chunked-read API this adapter's optional `stream()` hook could wrap.
+ * `capabilities.streaming` is `false`: `Client.execute()` always resolves a complete,
+ * fully-buffered `ResultSet`, and the package exposes no cursor or chunked-read API
+ * this adapter's optional `stream()` hook could wrap.
  *
  * ## Transactions
  *
- * Per-call isolation is why the naive path fails, and it is a property of
- * the API rather than an artifact of transport:
- * `Client.execute()`'s own doc comment (node_modules/@libsql/client's
- * re-exported `@libsql/core/api`'s `Client` interface) says every statement
- * it runs "is executed in its own logical database connection", and reading
- * `HttpClient.execute()` (lib-esm/http.js) shows that's not a metaphor — it
- * opens a Hrana stream, awaits the one statement, and closes that stream
- * before `execute()` even resolves. Confirmed live against the docker
- * container: three sequential `execute()` calls, `"BEGIN"` then an `INSERT`
- * then `"ROLLBACK"`, report `BEGIN` and the `INSERT` as successes, then
- * `ROLLBACK` rejects with `LibsqlError: SQLITE_UNKNOWN: SQLite error: cannot
- * rollback - no transaction is active` — the `BEGIN`'s transaction ended
- * the moment its own stream closed, so the `INSERT` after it was a plain
- * autocommit write, already durable by the time `ROLLBACK` discovers there
- * is nothing left to undo.
- *
- * That rules out routing BEGIN/COMMIT/ROLLBACK through plain `execute()`
- * unchanged; it does not rule out transactions. `Client.transaction(mode)`
- * opens a real session that stays open across multiple calls on the
- * `Transaction` object it returns — confirmed live, including a `ROLLBACK`
- * that actually undoes an insert, a `COMMIT` that keeps one, and savepoints
- * (`SAVEPOINT`/`ROLLBACK TO SAVEPOINT`/`RELEASE SAVEPOINT`) working
- * unmodified inside one. `execute()` below intercepts the transaction-
- * control statements knex emits and, once a `Transaction` exists for a
- * handle, forwards everything else straight to it instead of to the
- * isolated per-call path described above.
+ * `Client.execute()`'s doc says every statement runs "in its own logical database
+ * connection", and `HttpClient.execute()` confirms it: it opens a Hrana stream, awaits
+ * the one statement, and closes it before `execute()` resolves. Confirmed live: three
+ * sequential calls, `"BEGIN"` then an `INSERT` then `"ROLLBACK"`, report the first two
+ * as successes, then `ROLLBACK` rejects with "cannot rollback - no transaction is
+ * active" — the `BEGIN`'s transaction ended the moment its stream closed, so the
+ * `INSERT` was a plain autocommit write already durable by then. That rules out routing
+ * BEGIN/COMMIT/ROLLBACK through plain `execute()` unchanged, not transactions
+ * generally: `Client.transaction(mode)` opens a real session that stays open across
+ * calls on the `Transaction` object it returns — confirmed live, including a
+ * `ROLLBACK` that undoes an insert, a `COMMIT` that keeps one, and savepoints working
+ * unmodified inside one. `execute()` below intercepts the transaction-control
+ * statements knex emits and forwards everything else to the open `Transaction` instead.
  */
 export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
-  // Every `Client` this adapter's `acquire()` has handed out that `release()`
-  // hasn't yet closed — the same bookkeeping `src/adapters/mysql2.ts` keeps
-  // for its TCP connections. `destroy()` below is the safety net for
-  // whatever's left in here once tarn has released everything it currently
-  // holds; under normal operation that should usually be empty by then.
+  // Handles `acquire()` has handed out that `release()` hasn't yet closed —
+  // `destroy()` is the safety net for whatever's left when tarn tears down.
   const open = new Set<Client>()
 
-  // The `Transaction` currently open on a given handle, if any — knex holds
-  // one handle for a transaction's entire lifetime, which is what lets a
-  // `Transaction` object outlive the single `execute()` call that created it.
-  // `pendingMode` carries a `SET TRANSACTION READ ONLY;` from the statement
-  // that names it to the `BEGIN;` that follows it (see D3 in this adapter's
-  // execute() below) — knex always sends them as two separate calls on the
-  // same handle, in that order, before any transaction exists for it.
+  // The `Transaction` currently open on a given handle, if any — knex holds one
+  // handle for a transaction's entire lifetime, so the `Transaction` outlives the
+  // single `execute()` call that created it. `pendingMode` carries a `SET TRANSACTION
+  // READ ONLY;` from the statement that names it to the `BEGIN;` that follows it — knex
+  // always sends them as two separate calls on the same handle, in that order.
   const activeTx = new WeakMap<Client, Transaction>()
   const pendingMode = new WeakMap<Client, TransactionMode>()
 
-  // Rolls back and forgets whatever transaction is open on `client`, if any —
-  // shared by `release()` and `destroy()` below, both of which must not hand
-  // or leave a transaction-bearing handle behind them. The map entry is
-  // cleared before the rollback is even awaited, so it is gone regardless of
-  // whether that rollback succeeds; the rollback itself is best-effort here
-  // (unlike the caller-triggered COMMIT/ROLLBACK inside execute() below,
-  // whose own failure must still reach the caller) because there is no
-  // caller left to report it to at this point.
+  // Rolls back and forgets whatever transaction is open on `client` — shared by
+  // `release()` and `destroy()`, neither of which may leave a transaction-bearing
+  // handle behind. The map entry is cleared before the rollback is awaited, so it's
+  // gone regardless of outcome; the rollback itself is best-effort since there's no
+  // caller left to report failure to (unlike the caller-triggered COMMIT/ROLLBACK
+  // inside execute() below).
   async function abandonTransaction(client: Client): Promise<void> {
     const tx = activeTx.get(client)
     if (!tx) return
@@ -159,121 +107,66 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
       } catch {
         throw CfKnexError.missingDriver('@libsql/client')
       }
-      // A brand-new `Client` on every call — never one cached and shared;
-      // see this function's doc comment above for why sharing is actually
-      // unsafe here, not merely unnecessary. `createClient` does no I/O at
-      // all for an `http:`/`https:` URL: `HttpClient`'s constructor
-      // (node_modules/@libsql/client/lib-esm/http.js) stores the URL/token
-      // and calls `hrana.openHttp(url, token, fetch, remoteEncryptionKey)` —
-      // four arguments, so the fifth, `protocolVersion`, takes its declared
-      // default of `2` (node_modules/@libsql/hrana-client/lib-esm/index.js's
-      // `openHttp`). Inside `hrana`'s own `HttpClient` constructor
-      // (node_modules/@libsql/hrana-client/lib-esm/http/client.js), that
-      // `protocolVersion !== 3` takes the constructor down its `else`
-      // branch, which resolves `_endpointPromise` synchronously —
-      // `Promise.resolve(fallbackEndpoint)` — with no `fetch` call at all;
-      // `findEndpoint()` (the function that *would* probe the server, via a
-      // real `fetch`) only runs in the `protocolVersion === 3` branch, which
-      // `@libsql/client` never selects. An earlier draft of this comment
-      // claimed a background probe ran here anyway; it doesn't — confirmed
-      // by instrumenting `globalThis.fetch` around `createClient()` and
-      // observing zero calls in the 300ms after construction, against the
-      // same docker container this file's other live checks use.
+      // A brand-new `Client` on every call — never cached and shared (see this
+      // function's doc comment above for why sharing is unsafe here). `createClient`
+      // does no I/O for an `http:`/`https:` URL: it calls `hrana.openHttp` with only
+      // four arguments, so `protocolVersion` defaults to `2`, which resolves the hrana
+      // client's `_endpointPromise` synchronously instead of running `findEndpoint()`
+      // (the function that would actually probe the server) — that only runs for
+      // `protocolVersion === 3`, never selected. Confirmed by instrumenting `fetch`:
+      // zero calls after construction.
       const client = mod.createClient({ url: opts.url, authToken: opts.authToken, intMode: opts.intMode })
       open.add(client)
       return client
     },
 
-    // Tarn calls this only when permanently evicting a handle (idle
-    // timeout, pool shrink, or the whole pool tearing down) — see the
-    // `DriverAdapter` doc comment in src/core/types.ts. `open.delete` before
-    // `.close()` keeps `destroy()`'s own cleanup pass from double-closing
-    // this same client if that ever raced.
+    // Tarn calls this only when permanently evicting a handle (idle timeout, pool
+    // shrink, or teardown) — see `DriverAdapter` in src/core/types.ts. `open.delete`
+    // before `.close()` keeps `destroy()`'s cleanup pass from double-closing this
+    // client if that ever raced.
     async release(handle: unknown): Promise<void> {
       const client = handle as Client
       open.delete(client)
-      // A caller who runs `db.raw('BEGIN')` (or lets a `db.transaction()`
-      // callback hang) and never commits or rolls back must not hand a
-      // transaction-bearing handle to whatever tarn does with it next — see
-      // `abandonTransaction` above.
+      // A caller who runs `db.raw('BEGIN')` (or lets a `db.transaction()` callback
+      // hang) and never commits or rolls back must not hand tarn a transaction-bearing
+      // handle next — see `abandonTransaction` above.
       await abandonTransaction(client)
       client.close()
     },
 
-    // No `validate()` — omitted entirely, the same way
-    // src/adapters/tidb-http.ts omits it, and for the same underlying
-    // reason: `createKnexClient` (../core/client.ts) treats a missing
-    // `validate` as "always valid", which is correct for a handle that
-    // cannot go stale between queries the way a live TCP socket can (contrast
-    // src/adapters/mysql2.ts's `validate`, which reads four internal fields
-    // on a real socket).
+    // No `validate()` — omitted entirely, same as src/adapters/tidb-http.ts:
+    // `createKnexClient` (../core/client.ts) treats a missing `validate` as "always
+    // valid", correct for a handle that cannot go stale between queries the way a live
+    // TCP socket can (contrast src/adapters/mysql2.ts's `validate`, which reads
+    // internal fields on a real socket).
     //
-    // An earlier draft of this file implemented `validate` as `!client.closed`
-    // (the interface doc for `Client.closed` reads: "set to true after a
-    // call to close or if the client encounters an unrecoverable error," which
-    // sounds like exactly the liveness signal `validate` needs). Read against
-    // the actual field this adapter's handle exposes, that turned out not to
-    // hold for either URL scheme this adapter can reach:
+    // `!client.closed` looks like the obvious liveness check, but confirmed live it does
+    // not hold for either scheme: over HTTP, `client.closed` stayed `false` after a
+    // failing statement (`SQLITE_UNKNOWN: no such table`) and a total network failure
+    // (`fetch failed`) — `HttpClient.closed` forwards to the hrana client's `closed`
+    // getter, which only flips via `#setClosed`, wired only to `close()` and to a
+    // rejection handler on a promise `@libsql/client` never actually rejects (see
+    // `acquire()`'s comment above for why); `HttpClient.reconnect()` would reset it, but
+    // this adapter never calls it. Over WS, through a raw TCP proxy that killed the
+    // underlying socket mid-connection, `client.closed` also stayed `false`, and the
+    // *next* `execute()` call transparently reconnected and succeeded — `WsClient`
+    // self-heals via an inner, non-exposed hrana client and never propagates that state
+    // to the outer field this adapter could read.
     //
-    // - HTTP (`http:`/`https:`/`libsql:`): confirmed live against the docker
-    //   container — `client.closed` stayed `false` after a failing statement
-    //   (`SQLITE_UNKNOWN: no such table`) and after a total network failure
-    //   (`fetch failed`, against a closed port). The mechanism, stated
-    //   precisely rather than loosely (this field is what the earlier,
-    //   now-removed comment misdescribed as a background probe elsewhere in
-    //   this file, so it's worth being exact here too): `@libsql/client`'s
-    //   `HttpClient.closed` (lib-esm/http.js:205-207) is a getter that
-    //   forwards to the underlying hrana client's own `closed` getter
-    //   (@libsql/hrana-client/lib-esm/http/client.js:100), which reads a
-    //   private `#closed` field written only by `#setClosed` (same file,
-    //   :103). `#setClosed` has three call sites: `close()` (:97, this
-    //   adapter's own call) and an `_endpointPromise` rejection handler wired
-    //   on *both* constructor branches (:52 for `protocolVersion === 3`, :56
-    //   for the `else` branch `@libsql/client` always takes — see
-    //   `acquire()`'s comment above for why). The taken branch's handler can
-    //   never fire — it is attached to `Promise.resolve(fallbackEndpoint)`
-    //   (:55), which has no rejection path; only the v3 branch attaches it to
-    //   a real `findEndpoint()` fetch (:51), and that branch is never
-    //   selected. So neither call site fires for a statement failure or a
-    //   network failure. `HttpClient`'s `reconnect()` (lib-esm/http.js:192) would
-    //   reset `closed` by rebuilding the underlying hrana client, but this
-    //   adapter never calls it — `execute()` below calls `Client.execute()`
-    //   directly, never `reconnect()`.
-    // - WS (`ws:`/`wss:`): also confirmed live, through a raw TCP proxy in
-    //   front of the same server so the underlying socket could be destroyed
-    //   out from under an established connection (something not otherwise
-    //   reachable against a container shared with other agents). After the
-    //   proxy killed the socket, `client.closed` still read `false`, and the
-    //   *next* `execute()` call transparently reconnected and succeeded —
-    //   `WsClient`'s own `#openStream()` (node_modules/@libsql/client/
-    //   lib-esm/ws.js) checks an *inner*, non-exposed hrana client's `closed`
-    //   flag to self-heal, but never propagates that to the outer field this
-    //   adapter could read. (The one place in that file where a `closed`
-    //   getter *does* forward socket state — `lib-esm/ws.js`'s `WsTransaction`
-    //   class — belongs to the object `Client.transaction()` returns, not to
-    //   the plain `Client`/`WsClient` handle `acquire()` below hands out; it
-    //   was checked and ruled out as a source of liveness for this adapter's
-    //   handle specifically.)
-    //
-    // So for every scheme this adapter can actually be pointed at, `.closed`
-    // reflects only whether *this adapter* has called `.close()` — never
-    // genuine staleness — and a `validate` built on it would silently never
-    // return `false` for a truly dead handle, the opposite of what `validate`
-    // exists for.
+    // So for every scheme this adapter can reach, `.closed` reflects only whether *this
+    // adapter* called `.close()`, never genuine staleness — a `validate` built on it
+    // would silently never return `false` for a truly dead handle.
 
-    // BEGIN/COMMIT/ROLLBACK/SAVEPOINT-family statements bracket a real
-    // `Transaction` (see this file's "Transactions" doc comment above)
-    // instead of reaching `client.execute()`'s isolated per-call path.
-    // `activeTx`/`pendingMode` above are keyed by the handle because knex
-    // holds one handle for a transaction's entire lifetime.
+    // BEGIN/COMMIT/ROLLBACK/SAVEPOINT-family statements bracket a real `Transaction`
+    // (see the "Transactions" doc comment above) instead of reaching
+    // `client.execute()`'s isolated per-call path.
     async execute(handle, sql, bindings): Promise<RawResult> {
       const client = handle as Client
       const tx = activeTx.get(client)
 
       if (tx) {
-        // Cleared before the `await`, not after, so a failing COMMIT/ROLLBACK
-        // still ends the transaction as far as this adapter is concerned —
-        // the error itself still propagates to the caller, unmodified.
+        // Cleared before the `await`, not after, so a failing COMMIT/ROLLBACK still
+        // ends the transaction here; the error itself still propagates unmodified.
         if (COMMIT_STATEMENT.test(sql)) {
           activeTx.delete(client)
           await tx.commit()
@@ -284,8 +177,7 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
           await tx.rollback()
           return EMPTY_RESULT
         }
-        // Everything else, including every savepoint statement: confirmed
-        // live against both a libsql-server container and Turso that
+        // Confirmed live against both a libsql-server container and Turso:
         // SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE SAVEPOINT need no
         // translation once a `Transaction` exists.
         return toRawResult(await tx.execute({ sql, args: bindings as unknown as InArgs }))
@@ -298,10 +190,9 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
         return EMPTY_RESULT
       }
 
-      // `SET TRANSACTION …;` always precedes `BEGIN;` on the same handle —
-      // see knex's own `Transaction.prototype.begin`
-      // (node_modules/knex/lib/execution/transaction.js) — never arrives
-      // once a transaction is already open, so this only needs checking here.
+      // `SET TRANSACTION …;` always precedes `BEGIN;` on the same handle (knex's
+      // `Transaction.prototype.begin`, node_modules/knex/lib/execution/transaction.js)
+      // and never arrives once a transaction is open, so this only needs checking here.
       const setTransaction = SET_TRANSACTION_STATEMENT.exec(sql)
       const trxMode = setTransaction?.[1] ?? ''
       if (setTransaction) {
@@ -316,36 +207,22 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
         }
       }
 
-      // knex emits `SET TRANSACTION …` as the statement immediately before
-      // its `BEGIN`, so a remembered mode is only ever meant to survive one
-      // statement. Reaching any other statement first means that `BEGIN`
-      // never came — the transaction was abandoned, or `db.raw('SET
-      // TRANSACTION READ ONLY')` was issued directly with no transaction
-      // behind it — and the handle goes back to the pool still carrying it.
-      // Dropping it here is what stops tarn's next, unrelated borrower from
-      // silently getting a 'read' transaction out of an ordinary
-      // `db.transaction()`, whose writes then fail for no reason visible at
-      // the call site. Same defect, and same fix, as the remembered
-      // isolation level in src/adapters/tidb-http.ts.
+      // knex emits `SET TRANSACTION …` immediately before `BEGIN`, so a remembered mode
+      // is only meant to survive one statement. Reaching any other statement first
+      // means `BEGIN` never came — dropping the pending mode here stops tarn's next,
+      // unrelated borrower from silently getting a 'read' transaction out of an
+      // ordinary `db.transaction()`. Same fix as the remembered isolation level in
+      // src/adapters/tidb-http.ts.
       pendingMode.delete(client)
 
       return toRawResult(await client.execute({ sql, args: bindings as unknown as InArgs }))
     },
 
     async destroy(): Promise<void> {
-      // Closes whatever this adapter created that tarn never released (see
-      // the `open` comment above) and leaves the adapter itself reusable
-      // afterward — clearing the set rather than latching a "destroyed"
-      // flag, exactly like src/adapters/mysql2.ts's `destroy()`. Safe to
-      // call more than once (the `DriverAdapter` contract requires it):
-      // `HttpClient.close()` (node_modules/@libsql/hrana-client's
-      // `HttpClient`) guards itself with `#setClosed`, which returns
-      // immediately if the client is already closed, so re-closing an
-      // already-closed client here is a no-op, not a double-free. Each
-      // client's transaction, if any, is abandoned first — see
-      // `abandonTransaction` above — the same reasoning `release()` applies
-      // to a single handle, applied here to whatever `destroy()` itself is
-      // closing directly.
+      // Closes whatever tarn never released (see the `open` comment above); clears the
+      // set rather than latching a "destroyed" flag, like src/adapters/mysql2.ts's
+      // `destroy()`, so it's safe to call more than once and leaves the adapter reusable.
+      // Each client's transaction is abandoned first, same as `release()` does.
       for (const client of open) {
         await abandonTransaction(client)
         client.close()
@@ -356,32 +233,19 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
 }
 
 /**
- * `execute()` above always resolves a `ResultSet` that `@libsql/client`
- * itself constructed — `resultSetFromHrana`
- * (node_modules/@libsql/client/lib-esm/hrana.js) always builds a
- * `ResultSetImpl` (node_modules/@libsql/core's `util.js`) with `rows`,
- * `columns`, `rowsAffected` and `lastInsertRowid` as plain properties, never
- * a partial or differently-shaped object — there is no untrusted JSON
- * boundary here the way there is in src/adapters/tidb-http.ts's `toRawResult`
- * (that adapter reads a raw HTTP response body directly; this one reads
- * whatever the installed, already-parsed `@libsql/client` package handed
- * back). What *is* still worth guarding is the boundary this function itself
- * sits at: `handle`/`res` are `unknown` until cast, so a future version of
- * this package, or a test double standing in for one, that returns something
- * shaped differently would otherwise pass silently through as if it were a
- * real result — exactly the silently-wrong-success failure this project has
- * repeatedly found in adapter code. Guard `rows` (what every downstream
- * consumer iterates), `rowsAffected` (what `src/core/response.ts`'s sqlite
- * branch reports as `changes`) and `lastInsertRowid` (`insertId` — see the
- * `Number()` note below); deliberately do NOT also validate `columns`/
- * `columnTypes` the way src/adapters/tidb-http.ts's `toRawResult` validates
- * every field it reads: `src/core/response.ts`'s sqlite branch (unlike its
- * mysql/postgres branches) never reads `RawResult.fields` at all, so a
- * malformed `columns` array here would flow into a field no current caller
- * consumes rather than corrupting anything observable — so `columns` below
- * is passed straight through as `fields` unchanged, not coerced to
- * `undefined` if it's not an array, which would sit inconsistently next to
- * three fields above that throw instead of coercing.
+ * `execute()` always resolves a `ResultSet` that `@libsql/client` itself constructed —
+ * `resultSetFromHrana` (lib-esm/hrana.js) always builds a `ResultSetImpl` with `rows`,
+ * `columns`, `rowsAffected` and `lastInsertRowid` as plain properties, never partial or
+ * differently shaped, unlike src/adapters/tidb-http.ts's `toRawResult`, which reads a
+ * raw, untrusted HTTP body. Still worth guarding: this function's own `unknown`
+ * boundary, so a future version of the package (or a test double) returning something
+ * shaped differently doesn't pass silently through as a real result. Guard `rows`
+ * (what every consumer iterates), `rowsAffected` (`src/core/response.ts`'s sqlite
+ * branch reports it as `changes`) and `lastInsertRowid` (`insertId`, see the
+ * `Number()` note below). `columns`/`columnTypes` are deliberately NOT validated:
+ * `src/core/response.ts`'s sqlite branch never reads `RawResult.fields`, so a malformed
+ * `columns` here flows into a field no caller consumes — passed through unchanged
+ * rather than coerced to `undefined`, unlike the three fields above that throw.
  */
 function toRawResult(res: unknown): RawResult {
   if (res === null || typeof res !== 'object' || !('rows' in res)) {
@@ -404,46 +268,33 @@ function toRawResult(res: unknown): RawResult {
   return {
     rows,
     fields: columns,
-    // `ResultSet.lastInsertRowid` is typed `bigint | undefined` precisely so
-    // a 64-bit ROWID survives — src/core/response.ts's sqlite branch already
-    // documents this by name for libsql: "insertId is left as `number |
-    // bigint` — no `Number()` — because ... libsql's bigint `lastInsertRowid`
-    // ... would be silently corrupted by a float conversion." Pass the
-    // `bigint` straight through, matching src/adapters/mysql2.ts and
-    // src/adapters/tidb-http.ts's own normalization toward `bigint` for the
-    // same reason. This only covers the write path: reading a >2^53 id back
-    // in a later `SELECT`'s row *values* is a separate concern, controlled by
-    // `intMode` and not by anything here — see `LibsqlAdapterOptions.intMode`'s
-    // doc comment above for the read-back limitation and how to opt out of it.
+    // `lastInsertRowid` is typed `bigint | undefined` so a 64-bit ROWID survives —
+    // `Number()` would silently corrupt it (src/core/response.ts's sqlite branch names
+    // this). Passed straight through, matching src/adapters/mysql2.ts and
+    // src/adapters/tidb-http.ts; write path only — reading a >2^53 id back in a
+    // `SELECT` is controlled by `intMode`, see `LibsqlAdapterOptions` above.
     insertId: lastInsertRowid,
     affectedRows: rowsAffected,
   }
 }
 
-// Anchored, case-insensitive, tolerating an optional trailing semicolon —
-// same style as src/adapters/pg.ts's COMMIT_STATEMENT. Anchoring the end is
-// what keeps ROLLBACK_STATEMENT from matching "ROLLBACK TO SAVEPOINT x" and
-// COMMIT_STATEMENT from matching "RELEASE SAVEPOINT x;" — knex sends the
-// former without a trailing semicolon, so it's optional here, not required.
-// knex's own sqlite transaction dialect (node_modules/knex/lib/dialects/
-// sqlite3/execution/sqlite-transaction.js) emits only `BEGIN;` and never
-// `START TRANSACTION`, which is accepted anyway for whatever a caller's own
-// `db.raw()` sends. Inner whitespace is `\s+` rather than a literal space so
-// a caller's `db.raw('START  TRANSACTION')` is intercepted rather than
-// silently falling through to the isolated per-call path.
+// Anchored, case-insensitive, tolerating an optional trailing semicolon — same style
+// as src/adapters/pg.ts's COMMIT_STATEMENT. Anchoring the end keeps ROLLBACK_STATEMENT
+// from matching "ROLLBACK TO SAVEPOINT x" and COMMIT_STATEMENT from matching "RELEASE
+// SAVEPOINT x;". knex's sqlite transaction dialect emits only `BEGIN;`, never `START
+// TRANSACTION`, accepted anyway since a caller's own `db.raw()` might send it. Inner
+// whitespace is `\s+` so `db.raw('START  TRANSACTION')` is still intercepted.
 const BEGIN_STATEMENT = /^(?:BEGIN|START\s+TRANSACTION)\s*;?\s*$/i
 const COMMIT_STATEMENT = /^COMMIT\s*;?\s*$/i
 const ROLLBACK_STATEMENT = /^ROLLBACK\s*;?\s*$/i
 const SET_TRANSACTION_STATEMENT = /^SET\s+TRANSACTION\s+(.+?)\s*;?\s*$/i
-// knex's own `validIsolationLevels` (node_modules/knex/lib/execution/
-// transaction.js) is the exhaustive list of values `setIsolationLevel` ever
-// lets through — it throws before generating any SQL for anything outside
-// this list, so matching exactly these five is not a guess.
+// knex's own `validIsolationLevels` (node_modules/knex/lib/execution/transaction.js)
+// is the exhaustive list `setIsolationLevel` allows, so matching exactly these five is
+// not a guess.
 const ISOLATION_LEVEL = /ISOLATION\s+LEVEL\s+(READ\s+UNCOMMITTED|READ\s+COMMITTED|REPEATABLE\s+READ|SERIALIZABLE|SNAPSHOT)/i
 const READ_ONLY_STATEMENT = /READ\s+ONLY/i
 
-// What execute() returns for a transaction-control statement it intercepts
-// instead of sending to libsql — no real ResultSet exists for "BEGIN"
-// once it's been turned into a `client.transaction()` call, so nothing here
-// should look like one.
+// What execute() returns for a transaction-control statement it intercepts instead of
+// sending to libsql — no real ResultSet exists for a "BEGIN" once it's been turned
+// into a `client.transaction()` call.
 const EMPTY_RESULT: RawResult = { rows: [] }
