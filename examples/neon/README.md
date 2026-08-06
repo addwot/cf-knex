@@ -68,7 +68,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Streaming** | Supported. |
 | **Inserted ids** | Postgres has no `lastInsertId` — use `.returning('id')`. |
 | **Cold starts** | A scale-to-zero Neon branch can take a second or two to wake. The first query after idle is slow, not broken. |
-| **Migrations** | Run them from a plain Node knex process, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process, never from inside the Worker. |
 
 ## Deploy
 

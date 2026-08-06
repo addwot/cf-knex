@@ -35,12 +35,16 @@ export default tseslint.config(
     // so it needs Node's globals recognized rather than flagged as undefined.
     // Listed explicitly (not via the `globals` package) to avoid adding a new
     // dependency just for a handful of well-known identifiers.
-    files: ['scripts/**/*.mjs'],
+    // bench/ is grouped here for the same reason: it runs under
+    // `node --env-file=.env`, reads `process.env.TIDB_URL`, and times with
+    // `performance.now()`.
+    files: ['scripts/**/*.mjs', 'bench/**/*.mjs'],
     languageOptions: {
       globals: {
         console: 'readonly',
         process: 'readonly',
         URL: 'readonly',
+        performance: 'readonly',
       },
     },
   },

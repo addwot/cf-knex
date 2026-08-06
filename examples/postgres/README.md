@@ -84,7 +84,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Transactions** | Fully supported, including savepoints and isolation levels. |
 | **Streaming** | Supported. `.stream()` works, backed by a real cursor. |
 | **Inserted ids** | Postgres has no `lastInsertId` — use `.returning('id')`. |
-| **Migrations** | Run them from a plain Node knex process against the database, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process against the database, never from inside the Worker. |
 
 ## Deploy
 

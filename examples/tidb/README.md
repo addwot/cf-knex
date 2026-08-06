@@ -60,7 +60,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Streaming** | Not available. `.stream()` throws `UNSUPPORTED_CAPABILITY` — use `.limit()`/`.offset()`. |
 | **Inserted ids** | `insert()` resolves to a **bigint**, because the HTTP protocol returns `lastInsertId` as a decimal string. The same insert over `mysql2` gives a number. `JSON.stringify` throws on bigint — convert with `String(id)` before returning it. |
 | **Isolation levels** | `serializable` is rejected with `UNSUPPORTED_TRANSACTION_MODE` rather than silently downgraded. `readOnly: true` is rejected for the same reason. |
-| **Migrations** | Run them from a plain Node knex process, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process, never from inside the Worker. |
 
 ## Deploy
 

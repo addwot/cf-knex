@@ -38,11 +38,11 @@ Each README lists the bindings or secrets that example needs first.
 
 ## Two things that apply to all of them
 
-**`nodejs_compat` is required.** knex imports `events` and `timers`. Every
+**`nodejs_compat` is required.** Knex.js imports `events` and `timers`. Every
 `wrangler.jsonc` here sets it.
 
-**Migrations cannot run inside a Worker.** knex's `browser` field replaces its
+**Migrations cannot run inside a Worker.** Knex.js's `browser` field replaces its
 `Migrator` with a no-op, and Workers have no filesystem for the default migration
 source to read. Run migrations from your own tooling — `wrangler d1 migrations`,
-the Turso CLI, or a plain Node knex process. Reaching for `db.migrate` inside a
+the Turso CLI, or a plain Node Knex.js process. Reaching for `db.migrate` inside a
 Worker throws a typed `UNSUPPORTED_CAPABILITY` error explaining this.

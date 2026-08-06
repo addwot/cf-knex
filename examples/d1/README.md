@@ -31,7 +31,7 @@ npx wrangler d1 create cf-knex-example
 }
 ```
 
-`nodejs_compat` is not optional — knex imports `events` and `timers`.
+`nodejs_compat` is not optional — Knex.js imports `events` and `timers`.
 
 ## Schema
 
