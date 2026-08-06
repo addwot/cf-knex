@@ -129,7 +129,25 @@ jobs:
       # Deliberate: this job's install is reproducible up to this line and
       # not after it, unlike `static`'s.
       - run: pnpm add -D knex@${{ matrix.knex }}
-      - run: pnpm test -- --reporter=default --reporter=json --outputFile=vitest-report.json
+      # `pnpm run <script> <flags>` — explicit `run`, and no `--` separator.
+      # Both halves matter, and the two scripts here fail differently without
+      # them, which is why the form is spelled out identically in both jobs:
+      #
+      #   pnpm run test -- --outputFile=x   -> vitest gets `"--" "--outputFile=x"`
+      #                                        as positionals; NO report, exit 0
+      #   pnpm test --outputFile=x          -> `test` is a pnpm BUILT-IN command,
+      #                                        so pnpm parses the flag itself and
+      #                                        dies on "Unknown option: outputFile"
+      #
+      # `test:integration` is not a built-in, so it takes the implicit-`run`
+      # path and only the first trap applies to it. The `--`-less `run` form is
+      # the one spelling that works for both. Verified locally, every
+      # combination, against these exact commands.
+      #
+      # The silent half is what makes this worth the comment: a missing report
+      # does not fail the test run, only the assert step below, and it fails
+      # there as "report not found" — nothing that points back at the flags.
+      - run: pnpm run test --reporter=default --reporter=json --outputFile=vitest-report.json
       # Every database above is genuinely up in this job, so none of their
       # conformance suites should ever take the "URL not set" skip path. A
       # green `pnpm test` alone can't tell "ran and passed" apart from
@@ -137,10 +155,10 @@ jobs:
       - name: assert the docker-backed suites actually ran
         run: .github/scripts/assert-required-suites-ran.sh vitest-report.json MYSQL_URL MARIADB_URL POSTGRES_URL LIBSQL_URL
 
-  # The cloud-only tier: TiDB Serverless and (once a suite exists — see the
-  # comment below) Turso. No service containers here; these are real hosted
-  # services reached with repository secrets, which forked PRs never get, so
-  # this job is skipped there rather than failing on empty credentials.
+  # The cloud-only tier: TiDB Serverless, Turso, and Neon. No service
+  # containers here; these are real hosted services reached with repository
+  # secrets, which forked PRs never get, so this job is skipped there rather
+  # than failing on empty credentials.
   live:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -148,6 +166,7 @@ jobs:
       TIDB_URL: ${{ secrets.TIDB_URL }}
       TURSO_URL: ${{ secrets.TURSO_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      NEON_URL: ${{ secrets.NEON_URL }}
     steps:
       - uses: actions/checkout@v4
       - run: corepack enable
@@ -155,18 +174,24 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      # The TiDB Serverless conformance suite lives under test/integration/
-      # (gated on TIDB_URL, same test.skip placeholder pattern as the
-      # docker-backed suites) and so runs under the `node` vitest project —
-      # there is no separate test/live directory.
-      - run: pnpm test:integration -- --reporter=default --reporter=json --outputFile=vitest-report.json
-      # TURSO_URL/TURSO_AUTH_TOKEN are already wired into env above so a live
-      # Turso suite starts running here the moment one exists, but no test
-      # file reads them yet — only TIDB_URL is asserted below. Adding
-      # TURSO_URL to this list before that suite exists would fail this job
-      # unconditionally.
-      - name: assert the live TiDB suite actually ran
-        run: .github/scripts/assert-required-suites-ran.sh vitest-report.json TIDB_URL
+      # All three hosted suites live under test/integration/ (each gated on
+      # its credential with the same test.skip placeholder pattern as the
+      # docker-backed suites) and so run under the `node` vitest project —
+      # there is no separate test/live directory. Nothing else runs here:
+      # the docker-backed suites have no services in this job and take their
+      # own skip path, which is why they are not named in the assert below.
+      # Same `pnpm run <script> <flags>` form as the `test` job — see there.
+      - run: pnpm run test:integration --reporter=default --reporter=json --outputFile=vitest-report.json
+      # All three hosted tiers are asserted, not just TiDB. Each has a real
+      # suite (test/integration/tidb.test.ts, the Turso block in
+      # test/integration/libsql.test.ts, test/integration/neon.test.ts) that
+      # takes a named `test.skip` placeholder when its credential is absent,
+      # so without this the job goes green on a missing or misspelled secret
+      # while the README claims that backend is covered live. Turso needs
+      # both TURSO_URL and TURSO_AUTH_TOKEN; naming TURSO_URL is enough to
+      # catch either being unset, since the suite is gated on both together.
+      - name: assert the live hosted-tier suites actually ran
+        run: .github/scripts/assert-required-suites-ran.sh vitest-report.json TIDB_URL TURSO_URL NEON_URL
 
   # Publishes only if every job above actually succeeded — not skipped, not
   # cancelled, not failed. `needs:` alone would already block this job if a

@@ -58,6 +58,8 @@ declare -A VAR_TO_SUITE=(
   [POSTGRES_URL]="pg (direct)"
   [LIBSQL_URL]="libsql (Turso / libsql-server, HTTP)"
   [TIDB_URL]="tidb-http (TiDB Cloud Serverless)"
+  [TURSO_URL]="libsql (Turso, live)"
+  [NEON_URL]="pg (hosted: Neon, pooler)"
 )
 
 all_names="$(jq -r '.testResults[].assertionResults[].fullName' "$report")"
@@ -77,7 +79,13 @@ for var in "$@"; do
     continue
   fi
 
-  if echo "$skipped" | grep -qF "(${var} not set)"; then
+  # Matches on `(<VAR> ` rather than the whole `(<VAR> not set)`: a suite
+  # gated on more than one variable names all of them in one placeholder
+  # (`(TURSO_URL / TURSO_AUTH_TOKEN not set)`), and the stricter form silently
+  # matched none of those — passing the positive-evidence gate above while
+  # never being able to detect the skip, which is precisely the silent-green
+  # hole this script exists to close.
+  if echo "$skipped" | grep -qF "(${var} "; then
     echo "::error::a suite gated on ${var} was skipped, but ${var} is expected to be available in this job"
     missing=1
   fi
