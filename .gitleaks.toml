@@ -5,7 +5,7 @@ useDefault = true
 
 [[rules]]
 id = "cf-knex-db-url-credential"
-description = "Connection string with an inline username:password against a non-local host (mysql/postgres/libsql) — the realistic leak shape here is a TIDB_URL, TURSO_URL, MYSQL_URL, MARIADB_URL, POSTGRES_URL or LIBSQL_URL pasted with real credentials, e.g. into a commit message or a checked-in fixture"
+description = "Connection string with an inline username:password against a non-local host (mysql/postgres/libsql) — the realistic leak shape here is a TIDB_URL, NEON_URL, MYSQL_URL, MARIADB_URL, POSTGRES_URL or LIBSQL_URL pasted with real credentials, e.g. into a commit message or a checked-in fixture. TURSO_URL carries no userinfo and is deliberately not this rule's job: its credential is a separate JWT (TURSO_AUTH_TOKEN, also the ?authToken= value when one is inlined), which the inherited default `jwt` rule catches — verified against both shapes rather than assumed"
 regex = '''(?i)\b(?:mysql|postgres(?:ql)?|libsql):\/\/[A-Za-z0-9_.+-]+:[^\s"'@]{4,}@[A-Za-z0-9.-]+'''
 keywords = ["mysql://", "postgres://", "postgresql://", "libsql://"]
 
