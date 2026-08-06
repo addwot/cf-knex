@@ -1,7 +1,10 @@
 node_modules/
 dist/
-.env
-.env.local
+# Every .env variant, including ad-hoc backups like `.env.bak-1699999999` --
+# an exact-name rule let one of those sit untracked-but-unignored, one
+# `git add -A` away from committing live database credentials.
+.env*
+!.env.example
 .wrangler/
 coverage/
 *.log
