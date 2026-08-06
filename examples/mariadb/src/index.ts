@@ -10,7 +10,7 @@ export default {
   // adapter and the same `cf-knex/mysql` entry point. Note what is NOT here:
   // the `mariadb` npm package. cf-knex deliberately never loads it — knex's
   // own `browser` field cannot exclude `mariadb/callback`, and that single
-  // unresolvable import is what makes stock knex unbuildable for a Worker.
+  // unresolvable import is what makes stock Knex.js unbuildable for a Worker.
   async fetch(req: Request, env: Env): Promise<Response> {
     // Two ways to connect. Swap the commented line for Hyperdrive, which pools
     // connections at the edge and caches the TLS handshake — worth it for any

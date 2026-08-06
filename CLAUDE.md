@@ -1,6 +1,6 @@
 # cf-knex
 
-A knex-syntax database connector for Cloudflare Workers: TiDB Cloud Serverless, MySQL,
+A Knex.js-syntax database connector for Cloudflare Workers: TiDB Cloud Serverless, MySQL,
 Postgres, D1 and Turso, direct or via Hyperdrive. Published to npm as `cf-knex`, MIT,
 public repo `addwot/cf-knex`, default branch `master`.
 
@@ -33,7 +33,7 @@ is green without the hosted tiers. CI asserts the hosted suites actually ran.
 ## Layout
 
 - `src/adapters/*` — one per driver: `d1`, `libsql`, `mysql2`, `pg`, `tidb-http`.
-- `src/core/` — `client.ts` (knex client + pool + streaming), `infer.ts` (URL → driver,
+- `src/core/` — `client.ts` (Knex.js client + pool + streaming), `infer.ts` (URL → driver,
   and `redact()`), `errors.ts` (`CfKnexError` and its closed `code` union),
   `response.ts`, `types.ts`.
 - `src/index.ts` — the barrel. `buildAdapter`'s switch references all five factories, so
@@ -69,7 +69,7 @@ in `test/env.d.ts`; `process.env` is empty there.
 - **`type`, not `interface`** — enforced by eslint. The single exemption is
   `test/env.d.ts`, which needs declaration merging.
 - **Never assume library internals.** Read the installed `dist/`. This project has been
-  wrong about `@tidbcloud/serverless`'s transaction model, knex's dialect hooks, and
+  wrong about `@tidbcloud/serverless`'s transaction model, Knex.js's dialect hooks, and
   changesets' tag format — each time by reasoning instead of reading.
 - **Divergences between backends get a test, not a README sentence alone.** TiDB returns
   `insertId` as a bigint and `COUNT` as a decimal string where mysql2 gives numbers; both
@@ -128,7 +128,8 @@ one: it publishes only if `static`, `gitleaks`, `test` and `live` all genuinely 
 
 The `live` job needs repository secrets (`TIDB_URL`, `TURSO_URL`, `TURSO_AUTH_TOKEN`,
 `NEON_URL`). Set them with `gh secret set`; never paste their values into a transcript.
-It is skipped on forked PRs, which cannot see secrets.
+It does not run on pull requests at all — only on `master` and manual dispatch — so a
+PR is green without ever touching a hosted tier.
 
 ## Before opening a PR
 
