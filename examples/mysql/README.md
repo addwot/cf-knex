@@ -8,6 +8,10 @@ a Hyperdrive binding. MariaDB uses the same adapter; see
 
 ```sh
 npm install cf-knex knex mysql2
+# or
+pnpm add cf-knex knex mysql2
+# or
+yarn add cf-knex knex mysql2
 ```
 
 ## Two ways to connect

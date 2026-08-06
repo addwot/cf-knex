@@ -7,6 +7,10 @@ connection string, so there are no credentials in this example at all.
 
 ```sh
 npm install cf-knex knex
+# or
+pnpm add cf-knex knex
+# or
+yarn add cf-knex knex
 ```
 
 No driver package. The D1 binding *is* the driver — this is the only backend

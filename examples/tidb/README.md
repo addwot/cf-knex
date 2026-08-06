@@ -1,7 +1,8 @@
-# cf-knex + TiDB
+# cf-knex + TiDB Cloud Serverless
 
 TiDB can be reached two ways from a Worker, and they are genuinely different
-backends in cf-knex.
+backends in cf-knex. Only TiDB Cloud Serverless offers the first one; self-hosted
+TiDB and TiDB Dedicated speak the MySQL wire protocol and nothing else.
 
 | | Entry point | Driver | Transport |
 |---|---|---|---|
@@ -16,6 +17,10 @@ self-hosted cluster — then follow [`../mysql`](../mysql) instead, unchanged.
 
 ```sh
 npm install cf-knex knex @tidbcloud/serverless
+# or
+pnpm add cf-knex knex @tidbcloud/serverless
+# or
+yarn add cf-knex knex @tidbcloud/serverless
 ```
 
 ## Configure

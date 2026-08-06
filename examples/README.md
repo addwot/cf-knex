@@ -30,7 +30,7 @@ Two of these are the same backend as a neighbour, deliberately:
 
 ```sh
 cd examples/postgres
-npm install
+npm install        # or: pnpm install / yarn install
 npx wrangler dev
 ```
 

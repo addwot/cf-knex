@@ -18,6 +18,10 @@ serves correctly, and the import never appears.
 
 ```sh
 npm install cf-knex knex mysql2
+# or
+pnpm add cf-knex knex mysql2
+# or
+yarn add cf-knex knex mysql2
 ```
 
 ## Two ways to connect

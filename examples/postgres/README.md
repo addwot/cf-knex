@@ -8,6 +8,10 @@ connected either by URL or through a Hyperdrive binding. For Neon specifically s
 
 ```sh
 npm install cf-knex knex pg
+# or
+pnpm add cf-knex knex pg
+# or
+yarn add cf-knex knex pg
 ```
 
 ## Two ways to connect
