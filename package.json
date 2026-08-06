@@ -56,6 +56,7 @@
     "test:types": "vitest run --project=types",
     "test:live": "vitest run test/live",
     "typecheck": "tsc --noEmit",
+    "verify:bundle": "node scripts/verify-consumer-build.mjs",
     "lint": "eslint .",
     "size": "size-limit",
     "check:package": "publint && attw --pack ."

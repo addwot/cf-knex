@@ -25,4 +25,19 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-definitions': 'off',
     },
   },
+  {
+    // Unlike src/ (deliberately free of Node globals — see src/core/client.ts's
+    // `StreamSink` comment), scripts/ runs directly under Node via a shebang,
+    // so it needs Node's globals recognized rather than flagged as undefined.
+    // Listed explicitly (not via the `globals` package) to avoid adding a new
+    // dependency just for a handful of well-known identifiers.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        URL: 'readonly',
+      },
+    },
+  },
 )

@@ -1,5 +1,11 @@
-import Knex from 'knex'
 import type { Knex as KnexType } from 'knex'
+// The knex *factory* (`import Knex from 'knex'`, what this file used
+// before) reaches `knex/lib/dialects/index.js` — a static, module-scope
+// import a bundler must follow even though the branch that would use it
+// never runs here (see knex-dialects.d.ts). `makeKnex` is the deeper piece
+// that turns an already-constructed client into a callable `knex()`
+// instance without going through that resolution path at all.
+import makeKnex from 'knex/lib/knex-builder/make-knex.js'
 // knex ships types only for its public entry point; these deep CJS dialect
 // paths have no shipped declarations — see ./knex-dialects.d.ts. The
 // trailing `/index.js` is required, not cosmetic: knex has no `exports` map,
@@ -169,7 +175,11 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
   adapter: DriverAdapter,
   knexOptions: Record<string, unknown> = {},
 ): KnexType<TRecord, TResult> {
-  const Base = loadDialect(adapter.dialect) as new (...args: never[]) => KnexClientInstance
+  // `config: Record<string, unknown>` here (not `never[]`, what `loadDialect`
+  // itself returns) because `resolvedConfig` below is now passed straight
+  // into `new CfKnexClient(resolvedConfig)` — this file's own replacement
+  // for what knex's `Knex()` factory used to do internally.
+  const Base = loadDialect(adapter.dialect) as new (config: Record<string, unknown>) => KnexClientInstance
 
   class CfKnexClient extends Base {
     // knex's base Client constructor calls this whenever `config.connection`
@@ -446,12 +456,24 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     log?: Record<string, unknown>
   }
 
-  return Knex({
+  // Mirrors what `knex/lib/knex-builder/Knex.js`'s factory function does
+  // with the config it resolves (`makeKnex(new Dialect(resolvedConfig))`,
+  // plus copying `userParams` onto the result) — minus `resolveConfig`
+  // itself, which this call has no use for: it exists to turn a
+  // `client`/`dialect` *string* into a class via `knex/lib/dialects`, and
+  // `CfKnexClient` is already a class. Constructing it directly is what
+  // keeps that lookup, and the bundler-hostile import it requires, out of
+  // the graph entirely.
+  const resolvedConfig = {
     ...dialectDefaults,
     ...poolDefault,
     ...restOptions,
     connection: { ...connectionDefault, ...callerConnection },
     log: { ...DEFAULT_LOG, ...callerLog },
     client: CfKnexClient as unknown as typeof KnexType.Client,
-  }) as KnexType<TRecord, TResult>
+  }
+  const newKnex = makeKnex(new CfKnexClient(resolvedConfig)) as KnexType<TRecord, TResult>
+  const userParams = (resolvedConfig as { userParams?: unknown }).userParams
+  if (userParams) (newKnex as unknown as { userParams: unknown }).userParams = userParams
+  return newKnex
 }
