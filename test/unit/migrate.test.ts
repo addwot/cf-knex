@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test'
 import { expect, test } from 'vitest'
 import { createD1Adapter } from '../../src/adapters/d1'
 import { createKnexClient } from '../../src/core/client'
+import { CfKnexError } from '../../src/core/errors'
 
 // knex's own `package.json` `browser` field maps
 // `./lib/migrations/migrate/Migrator.js` and `./lib/migrations/seed/Seeder.js`
@@ -47,9 +48,12 @@ test('db.seed.run() with no seedSource rejects the same way', async () => {
 // `disableTransactions: true` is set (node_modules/knex/lib/migrations/
 // migrate/Migrator.js), and src/adapters/d1.ts's `transaction()` override
 // unconditionally rejects (`capabilities.transactions: false` -- D1 has no
-// BEGIN/COMMIT/ROLLBACK). The rejection below is this adapter's own
-// declared limitation surfacing through knex's migration machinery, not a
-// filesystem problem and not the browser-field stub from the test above.
+// BEGIN/COMMIT/ROLLBACK). The test below asserts on that rejection's own
+// `CfKnexError.code`, not its message: D1 itself rejects a literal `BEGIN`
+// statement with an unrelated error whose message also happens to contain
+// "TRANSAC", so a message-pattern match alone cannot tell this adapter's own
+// declared limitation apart from D1 failing to execute the statement knex
+// sent it.
 const inMemoryMigrationSource = {
   getMigrations: async () => [{ name: '001_create_widgets.js' }],
   getMigrationName: (migration: { name: string }) => migration.name,
@@ -68,15 +72,41 @@ const inMemoryMigrationSource = {
 // (confirmed empirically -- a `knex_migrations`/`widgets` table created by an
 // earlier run is still there on the next one), so each test below drops its
 // own tables first rather than assuming a clean database.
-test('db.migrate.latest() with a filesystem-free migrationSource still rejects -- D1 has no knex-level transaction support', async () => {
+test('db.migrate.latest() with a filesystem-free migrationSource rejects with this adapter\'s own UNSUPPORTED_CAPABILITY error -- D1 has no knex-level transaction support', async () => {
   const db = createKnexClient(createD1Adapter({ binding: env.DB }))
   await db.raw('drop table if exists widgets')
   await db.raw('drop table if exists knex_migrations')
   await db.raw('drop table if exists knex_migrations_lock')
-  await expect(db.migrate.latest({ migrationSource: inMemoryMigrationSource })).rejects.toThrow(/transaction/i)
+  try {
+    await db.migrate.latest({ migrationSource: inMemoryMigrationSource })
+    throw new Error('expected db.migrate.latest() to reject')
+  } catch (err) {
+    expect(err).toBeInstanceOf(CfKnexError)
+    expect((err as CfKnexError).code).toBe('UNSUPPORTED_CAPABILITY')
+  }
 })
 
-test('db.migrate.rollback() with a filesystem-free migrationSource rejects the same way', async () => {
+// Unlike `latest()` above, `rollback()` never wraps its own call in
+// `knex.transaction(...)` -- it goes straight into Migrator's `_runBatch`,
+// which acquires the migration lock through its *own*, separate
+// `knex.transaction(...)` call and catches whatever that rejects with,
+// wrapping it in a `LockError`. Catching it is what breaks the assertion:
+// Migrator's catch block logs the failure via
+// `this.knex.client.logger.warn(...)` (node_modules/knex/lib/logger.js)
+// before rethrowing, and that call reads `color.yellow` off `colorette` as a
+// plain function argument -- evaluated unconditionally, before the logger
+// ever checks whether a caller-supplied `warn` override applies -- and
+// `colorette` fails to resolve under this project's vitest-pool-workers
+// harness. So `db.migrate.rollback()` here always rejects with the same
+// generic `TypeError: Cannot read properties of undefined (reading
+// 'yellow')`, no matter what actually made the lock acquisition fail
+// underneath it: confirmed by running this exact case against both a
+// working and a mutated (`capabilities.transactions: true`)
+// src/adapters/d1.ts and observing an identical rejection either way. No
+// assertion on the rejection can tell "D1 has no transactions" apart from
+// any other cause of a failed lock in this harness, so this test only pins
+// "still rejects" -- not a cause.
+test('db.migrate.rollback() with a filesystem-free migrationSource still rejects, but the cause is not distinguishable in this harness', async () => {
   const db = createKnexClient(createD1Adapter({ binding: env.DB }))
   await db.raw('drop table if exists widgets')
   await db.raw('drop table if exists knex_migrations')
@@ -85,20 +115,12 @@ test('db.migrate.rollback() with a filesystem-free migrationSource rejects the s
 })
 
 // `disableTransactions: true` only skips wrapping the migration's own up/down
-// content in a transaction -- Migrator's lock step (`_getLock`, the same
-// file) unconditionally calls `knex.transaction(...)` to guard the
-// `knex_migrations_lock` row regardless of that option, so the D1 rejection
-// above still happens. In this specific harness it surfaces as an unrelated
-// crash instead of a clear message: Migrator's own catch block logs the
-// failure via `this.knex.client.logger.warn(...)`
-// (node_modules/knex/lib/logger.js), and that call's `color.yellow` argument
-// throws because `colorette` fails to resolve here -- the same
-// vitest-pool-workers-specific gap src/core/client.ts's `DEFAULT_LOG`
-// comment already documents for dialect-constructor logging. The assertion
-// below only pins "still rejects, one way or another" -- the exact message
-// is an accident of an unrelated bug in this test harness, not a contract
-// this project could or should preserve.
-test('db.migrate.latest() with disableTransactions still rejects -- the migration lock itself still needs a transaction', async () => {
+// content in a transaction -- Migrator's lock step still unconditionally
+// calls `knex.transaction(...)` regardless of that option, the same
+// `_runBatch` path `rollback()` above takes, so this hits the identical
+// colorette crash the comment above explains, confirmed the same way. This
+// only pins "still rejects" -- not a cause.
+test('db.migrate.latest() with disableTransactions still rejects, but the cause is not distinguishable in this harness', async () => {
   const db = createKnexClient(createD1Adapter({ binding: env.DB }))
   await expect(db.migrate.latest({ migrationSource: inMemoryMigrationSource, disableTransactions: true })).rejects.toThrow()
 })
