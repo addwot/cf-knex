@@ -106,20 +106,50 @@ test('rejects a binding that is present but not D1-shaped', () => {
 // regex.
 test.each<[string, string, string]>([
   ['masks simple authority userinfo', 'oracle://u:p@h:3306/db', 'oracle://***@h:3306/db'],
-  ['leaves a query @ intact when there is no userinfo', 'oracle://h.example.com/db?t=a@b', 'oracle://h.example.com/db?t=a@b'],
+  // The host stays visible here: with no userinfo present, nothing in the
+  // authority is masked, so a query `@` is not mistaken for a userinfo
+  // boundary. (The query *value* is masked for a separate reason — see the
+  // authToken cases below.)
+  ['leaves the authority intact when there is no userinfo', 'oracle://h.example.com/db?t=a@b', 'oracle://h.example.com/db?t=***'],
   ['masks a password containing a literal @ in full, not just up to the first @', 'oracle://u:p@ss@h/db', 'oracle://***@h/db'],
   [
-    'masks an @-containing password and leaves an unrelated query @ intact, at once',
+    'masks an @-containing password without letting a later query @ extend the userinfo match',
     'oracle://u:p@ss@h/db?note=a@b',
-    'oracle://***@h/db?note=a@b',
+    'oracle://***@h/db?note=***',
   ],
   // A malformed url — e.g. a template literal that lost its protocol prefix
   // — is exactly the caller mistake that lands here, and the anchor on
   // `scheme://` must not treat "no scheme" as "nothing to redact".
   ['masks a password on a protocol-relative url (no scheme)', '//u:pASSWORD@h/db', '//***@h/db'],
   ['masks a password on a fully schemeless url (no scheme, no //)', 'u:pASSWORD@h/db', 'u:***@h/db'],
+  // A libsql/Turso url carries its bearer token in the query and has no
+  // userinfo at all, so userinfo masking alone leaves it entirely in the
+  // clear. This is the exact url a Turso user reaches this message with:
+  // an `https://` host that is neither libsql-schemed nor tidbcloud, with
+  // no `driver` set.
+  ['masks an authToken carried in the query string', 'https://db-org.turso.io/?authToken=eyJhbGciOi.SECRET', 'https://db-org.turso.io/?authToken=***'],
+  [
+    'masks every query value, not only the first',
+    'https://h/?authToken=SECRET1&password=SECRET2',
+    'https://h/?authToken=***&password=***',
+  ],
+  // Not a name blocklist: a credential under an unremarkable parameter name
+  // is masked exactly the same way.
+  ['masks a query value whose parameter name looks harmless', 'https://h/?t=SECRET', 'https://h/?t=***'],
 ])('redact %s', (_name, url, redacted) => {
   const err = catchCfKnexError(() => inferDriver({ engine: 'mysql', url }))
   expect(err.code).toBe('UNKNOWN_DRIVER')
   expect(err.message).toContain(redacted)
+})
+
+// The assertion above is `toContain(redacted)`, which a message that also
+// carried the raw secret somewhere else would still satisfy. These check the
+// other half: the secret is absent from the whole message.
+test.each<string>([
+  'https://db-org.turso.io/?authToken=eyJhbGciOi.SECRET',
+  'https://h/?authToken=SECRET1&password=SECRET2',
+  'oracle://u:pSECRET@h/db',
+])('redact leaves no trace of the secret in %s', (url) => {
+  const err = catchCfKnexError(() => inferDriver({ engine: 'mysql', url }))
+  expect(err.message).not.toMatch(/SECRET/)
 })

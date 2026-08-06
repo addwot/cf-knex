@@ -137,6 +137,26 @@ function schemeOf(url: string): string {
 // very start of a schemeless url is genuinely indistinguishable from a
 // real scheme — that's fine, since it's the username, not the password,
 // that ends up in the clear.
+//
+// The second replace exists because userinfo is not the only place a
+// credential rides in a url, and the messages this feeds are the ones a
+// caller with a *wrong* url reaches — precisely the case where the url is
+// something other than the driver expected. Turso/libsql is the concrete
+// example: `https://db-org.turso.io/?authToken=eyJ...` carries the whole
+// bearer token in the query and has no userinfo at all, so the first
+// replace leaves it completely untouched and the token lands verbatim in
+// "cannot infer a driver from url '…'".
+//
+// Every query *value* goes, not a list of credential-looking parameter
+// names. A name blocklist is wrong by construction here: this function's
+// contract is "safe to put in an error message", and a blocklist can only
+// ever promise "safe unless the parameter is called something I didn't
+// think of". Parameter names survive, which is where the diagnostic value
+// actually is — a caller needs to see *that* they passed `authToken`, never
+// what it was. `[^&]*` deliberately does not stop at a second `?`, so a
+// malformed query over-redacts rather than under-redacts.
 function redact(url: string): string {
-  return url.replace(/^([a-z][a-z0-9+.-]*:)?(\/\/)?(?:[^/@]*@)+/i, (_m, scheme, slashes) => `${scheme ?? ''}${slashes ?? ''}***@`)
+  return url
+    .replace(/^([a-z][a-z0-9+.-]*:)?(\/\/)?(?:[^/@]*@)+/i, (_m, scheme, slashes) => `${scheme ?? ''}${slashes ?? ''}***@`)
+    .replace(/([?&][^=&]*=)[^&]*/g, '$1***')
 }
