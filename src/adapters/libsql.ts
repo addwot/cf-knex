@@ -316,6 +316,19 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
         }
       }
 
+      // knex emits `SET TRANSACTION …` as the statement immediately before
+      // its `BEGIN`, so a remembered mode is only ever meant to survive one
+      // statement. Reaching any other statement first means that `BEGIN`
+      // never came — the transaction was abandoned, or `db.raw('SET
+      // TRANSACTION READ ONLY')` was issued directly with no transaction
+      // behind it — and the handle goes back to the pool still carrying it.
+      // Dropping it here is what stops tarn's next, unrelated borrower from
+      // silently getting a 'read' transaction out of an ordinary
+      // `db.transaction()`, whose writes then fail for no reason visible at
+      // the call site. Same defect, and same fix, as the remembered
+      // isolation level in src/adapters/tidb-http.ts.
+      pendingMode.delete(client)
+
       return toRawResult(await client.execute({ sql, args: bindings as unknown as InArgs }))
     },
 

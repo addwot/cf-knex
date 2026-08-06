@@ -259,3 +259,55 @@ test('acquire() returns a fresh handle on every call, never a shared one (regres
   expect(second).not.toBe(first)
   await adapter.destroy()
 })
+
+// `SET TRANSACTION READ ONLY` is remembered on the handle so the `BEGIN`
+// knex emits immediately after it opens a 'read' transaction rather than the
+// default 'write'. These pin the other half: that memory must not outlive
+// the one statement it was meant for. tarn reuses a handle across unrelated
+// callers, and a stale 'read' turns a later, ordinary `db.transaction()`
+// into a read-only one whose writes fail for no reason the caller can see.
+// (src/adapters/tidb-http.ts carries the same pair for its own remembered
+// isolation level -- same defect, same shape.)
+function makeReadOnlyProbe() {
+  const tx = { execute: vi.fn(), commit: vi.fn(), rollback: vi.fn(), close: vi.fn() } as unknown as Transaction
+  const transaction = vi.fn().mockResolvedValue(tx)
+  const execute = vi.fn().mockResolvedValue({ rows: [], rowsAffected: 0, columns: [] })
+  const handle = { transaction, execute, close: vi.fn() } as unknown as Client
+  return { handle, transaction }
+}
+
+test('a remembered read-only mode does not leak into a later unrelated transaction', async () => {
+  const { handle, transaction } = makeReadOnlyProbe()
+  const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
+
+  await adapter.execute(handle, 'SET TRANSACTION READ ONLY;', [])
+  await adapter.execute(handle, 'select 1', [])
+  await adapter.execute(handle, 'BEGIN;', [])
+
+  expect(transaction).toHaveBeenCalledWith('write')
+})
+
+test('a remembered read-only mode does not survive a BEGIN that failed', async () => {
+  const { handle, transaction } = makeReadOnlyProbe()
+  transaction.mockRejectedValueOnce(new Error('network'))
+  const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
+
+  await adapter.execute(handle, 'SET TRANSACTION READ ONLY;', [])
+  await expect(adapter.execute(handle, 'BEGIN;', [])).rejects.toThrow('network')
+  await adapter.execute(handle, 'BEGIN;', [])
+
+  expect(transaction).toHaveBeenLastCalledWith('write')
+})
+
+test('the read-only mode still reaches the BEGIN that immediately follows it', async () => {
+  // The complement of the two above: dropping the memory too eagerly would
+  // pass both of them and silently break `db.transaction(fn, { readOnly:
+  // true })`, which is the entire reason the memory exists.
+  const { handle, transaction } = makeReadOnlyProbe()
+  const adapter = createLibsqlAdapter({ url: 'http://127.0.0.1:8080' })
+
+  await adapter.execute(handle, 'SET TRANSACTION READ ONLY;', [])
+  await adapter.execute(handle, 'BEGIN;', [])
+
+  expect(transaction).toHaveBeenCalledWith('read')
+})
