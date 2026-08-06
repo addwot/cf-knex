@@ -34,6 +34,22 @@ jobs:
       - run: pnpm build
       - run: pnpm check:package
       - run: pnpm size
+      # Packs the tarball `npm publish` would ship, installs it into a
+      # throwaway project alongside real wrangler, and runs `wrangler deploy
+      # --dry-run` for every published entry point. Nothing else in this
+      # workflow builds the package the way a consumer does: both vitest
+      # projects resolve modules lazily, so a `require()` of an absent
+      # optional dependency sitting in a dependency's reachable graph passes
+      # every test here and still breaks every consumer's build. That exact
+      # defect shipped once and was invisible to a fully green suite.
+      #
+      # Slow (a real `npm install`, then one esbuild pass per entry point)
+      # and network-dependent, which is why it is a separate step and not
+      # part of `pnpm test`. It runs on every push and PR rather than only
+      # before publish, so the break surfaces at review time; `release`
+      # needs this job, so publish stays gated either way.
+      - name: verify the published package builds in a consumer's Worker
+        run: pnpm verify:bundle
 
   gitleaks:
     runs-on: ubuntu-latest
