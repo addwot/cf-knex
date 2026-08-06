@@ -43,6 +43,28 @@ export default defineConfig({
           name: 'node',
           environment: 'node',
           include: ['test/integration/**/*.test.ts'],
+          // Vitest's defaults (5s per test, 10s per hook) are sized for
+          // CPU-bound unit tests. Every test in this project instead spends
+          // its whole budget on sequential round trips to a real database —
+          // over HTTPS to a hosted serverless tier, from a CI runner, for the
+          // TiDB/Turso/Neon suites.
+          //
+          // Those defaults were not merely tight, they failed: the tidb
+          // conformance suite's concurrent-write case timed out at exactly
+          // 5000ms on one CI attempt and passed on a retry of the *same*
+          // commit, taking `afterAll` down with it at exactly 10000ms. That
+          // case has the least headroom of any test here because it spends up
+          // to 2s of its budget on the deliberate starved-pool race below
+          // before making three more round trips; its best observed CI time is
+          // 971ms, so the default left under 5x margin against a transport
+          // whose tail latency is not ours to control.
+          //
+          // Deliberately not `retry`: the assertions never disagreed with the
+          // database, they ran out of clock. Retrying would also paper over a
+          // genuine intermittent bug in the adapters, which is the one class
+          // of defect this suite exists to catch.
+          testTimeout: 30_000,
+          hookTimeout: 30_000,
         },
       },
       {

@@ -12,6 +12,15 @@ import type { AdapterCapabilities } from '../../src/core/types'
 // checked.
 type ConformanceOptions = AdapterCapabilities & { singleWriter?: boolean }
 
+// How long the concurrent-write case below waits for its "outside" insert
+// before declaring the pool starved. A starved pool hangs *forever* rather
+// than merely being slow, so this only has to outlast real latency, and
+// erring long costs nothing: it stays well inside the 30s per-test budget in
+// vitest.config.ts. Erring short does cost something — at the original 2s,
+// a slow-but-working hosted backend would fail this case with a confident
+// "pool can't supply a second connection" message that is simply untrue.
+const STARVED_POOL_DEADLINE_MS = 10_000
+
 export function runConformanceSuite(name: string, factory: () => Knex, caps: ConformanceOptions) {
   describe(`conformance: ${name}`, () => {
     let db: Knex
@@ -146,7 +155,7 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Con
       // A single-writer database cannot run this case concurrently at all: the
       // open write transaction holds a database-wide write lock, so the
       // "outside" insert below cannot complete until the transaction ends, and
-      // the 2s race would always trip. The serialized variant further down
+      // the starved-pool race would always trip. The serialized variant below
       // checks the same integrity property in the only order such a database
       // permits. Confirmed against both a local libsql-server container and a
       // live Turso database.
@@ -197,7 +206,7 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Con
         const starved = Symbol('pool starved')
         const raced = await Promise.race([
           outsideInsert,
-          new Promise((resolve) => setTimeout(() => resolve(starved), 2000)),
+          new Promise((resolve) => setTimeout(() => resolve(starved), STARVED_POOL_DEADLINE_MS)),
         ])
         releaseGate()
 
@@ -207,7 +216,7 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Con
           // still checked out into whatever runs after it.
           await trxPromise.catch(() => {})
           throw new Error(
-            "timed out waiting for the concurrent insert to complete — most likely the factory's pool can't supply a second connection while the transaction above still holds the only one (needs pool: { max } >= 2; 'pool: { max: 1 }' starves it), though a fixed 2s deadline could in principle also trip on an unrelated slow/lock-blocked insert",
+            `timed out after ${STARVED_POOL_DEADLINE_MS}ms waiting for the concurrent insert to complete — most likely the factory's pool can't supply a second connection while the transaction above still holds the only one (needs pool: { max } >= 2; 'pool: { max: 1 }' starves it), though a fixed deadline could in principle also trip on an unrelated slow or lock-blocked insert`,
           )
         }
 
