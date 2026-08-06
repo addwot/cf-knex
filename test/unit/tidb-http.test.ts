@@ -12,18 +12,16 @@ test('requests fullResult and maps write metadata', async () => {
   expect(raw.affectedRows).toBe(3)
 })
 
-test('declares no streaming, no transactions, and dialect mysql', () => {
+test('declares no streaming, supports transactions, and dialect mysql', () => {
   const adapter = createTidbHttpAdapter({ url: 'mysql://u:p@x.tidbcloud.com:4000/db' })
   expect(adapter.dialect).toBe('mysql')
   expect(adapter.driver).toBe('tidb-http')
   expect(adapter.capabilities.streaming).toBe(false)
-  // See src/adapters/tidb-http.ts's doc comment for the full evidence trail:
-  // routing BEGIN/COMMIT/ROLLBACK through this adapter's `execute()` is
-  // mechanically reachable (verified against a stub HTTP transport), but
-  // `false` here because that has not been verified against a live TiDB
-  // Cloud gateway, and an unverified `true` risks a `db.transaction()` that
-  // silently commits a rollback -- the worst failure mode this contract has.
-  expect(adapter.capabilities.transactions).toBe(false)
+  // See src/adapters/tidb-http.ts's doc comment for why: `execute()`
+  // intercepts BEGIN/COMMIT/ROLLBACK and routes them through
+  // `Connection.begin()`/`Tx.execute()` rather than the package's ordinary
+  // `Connection.execute()`, which is what makes this safe to declare `true`.
+  expect(adapter.capabilities.transactions).toBe(true)
 })
 
 test('omits validate() entirely -- an HTTP-backed handle cannot go stale between queries', () => {
