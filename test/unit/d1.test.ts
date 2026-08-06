@@ -128,7 +128,8 @@ test('an INSERT through one acquire() handle does not corrupt or leak into an un
 })
 
 test('a real query through this adapter never marks env.DB itself -- __knexUid / __knex__disposed stay off the shared binding', async () => {
-  // The actual regression guard for this fix round's central change: knex's
+  // The regression guard for why acquire() hands out a fresh forwarding
+  // wrapper rather than opts.binding itself: knex's
   // pool writes __knexUid onto whatever acquireRawConnection() returns (to
   // track it internally), and connection.__knex__disposed on a failure path
   // (see acquire()'s own comment in src/adapters/d1.ts for the exact knex

@@ -175,7 +175,7 @@ export function resolveConfig(opts: PgAdapterOptions): Record<string, unknown> {
 
 // Row batch size for the `FETCH` loop inside `stream()` below — how many
 // rows cross the wire per round trip, not a cap on total rows streamed.
-// Unremarkable and not tuned for this task; a caller with different memory/
+// A plain default, not a tuned one; a caller with different memory/
 // latency tradeoffs has no way to override it today.
 const FETCH_BATCH_SIZE = 100
 
@@ -261,11 +261,13 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
   // the resulting `commit()`/`rollback()` has fully resolved, with no
   // dependency on whether some other, still-unawaited `trx(...).stream()`
   // call on that same connection has finished its own cleanup yet. Same
-  // shape of race, different trigger. (This corrects an earlier version of
-  // this comment, and this task's report, that described the Transform-
-  // 'close' path itself as applying "unconditionally, including inside
-  // `db.transaction()`" — it does not; the transactional exposure is real
-  // but runs through `Transaction.acquireConnection`, not that handler.)
+  // shape of race, different trigger. Stated precisely because it is easy
+  // to get wrong in the obvious direction: the Transform-'close' path does
+  // NOT apply unconditionally "including inside `db.transaction()`" — there
+  // it reaches `trxClient.releaseConnection`, which `makeTxClient`
+  // (node_modules/knex/lib/execution/transaction.js) has already replaced
+  // with a no-op. The transactional exposure is real, but it runs through
+  // `Transaction.acquireConnection`'s own `finally`, not that handler.
   //
   // Both paths ultimately reach the same place: tarn's `Pool.js` `release()`
   // moves the handle to `free` and, if another caller is already waiting,

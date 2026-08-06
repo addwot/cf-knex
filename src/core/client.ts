@@ -485,7 +485,7 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // — and marks it with an own `transacting: true` property the real
     // client never has. That transactor has no pool of its own (`super.destroy()`
     // already no-ops for it, since its inherited `this.pool` is `undefined`),
-    // but nothing before this fix-round stopped `adapter.destroy()` from
+    // but without the guard below nothing stops `adapter.destroy()` from
     // running anyway: calling `trx.destroy()` inside a transaction would
     // tear down every connection the *adapter* holds, including the one the
     // transaction itself is still using to COMMIT — breaking the parent

@@ -65,7 +65,7 @@ if (process.env.TIDB_URL) {
     }
   })
 
-  // Regression test for the bug this task fixes: before `execute()` learned
+  // Regression test: before `execute()` learned
   // to intercept BEGIN, `db.raw('BEGIN')` ran as an ordinary statement on
   // the handle knex already held, permanently poisoning it — every later
   // query on that same handle failed with "Transaction connection not
