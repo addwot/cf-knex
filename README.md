@@ -520,6 +520,9 @@ pnpm verify:bundle        # packs the tarball and builds it with real wrangler
 Hosted-tier suites are skipped unless their environment variables are set; a skipped
 suite says which variable was missing rather than passing quietly.
 
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the rest: which directory a test belongs in and
+why, when a changeset is needed, and what CI does and does not check on a pull request.
+
 ## License
 
 MIT
