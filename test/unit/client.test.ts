@@ -724,7 +724,7 @@ test('hardenMigrationAccessors: a TypeError from the getter becomes a CfKnexErro
     // "migrations/seeds" in prose, so a looser substring check here would
     // still pass even if the capability argument itself were dropped or
     // swapped.
-    expect((err as CfKnexError).message).toMatch(/^db\.migrate is not supported/)
+    expect((err as CfKnexError).message).toMatch(/^db\.migrate is not available/)
   }
 })
 
@@ -744,7 +744,7 @@ test('hardenMigrationAccessors: hardens seed the same way as migrate, not only m
     // Same reasoning as the migrate test above -- the hint text's own prose
     // mentions "seeds", so this is matched against the leading phrase, not a
     // bare substring check.
-    expect((err as CfKnexError).message).toMatch(/^db\.seed is not supported/)
+    expect((err as CfKnexError).message).toMatch(/^db\.seed is not available/)
   }
 })
 
@@ -806,21 +806,21 @@ test('hardenMigrationAccessors: the property stays configurable and an accessor,
   expect(descriptor?.value).toBeUndefined()
 })
 
-test('hardenMigrationAccessors: reads the driver name off target.client.driverName when present, falls back to a generic label when absent', () => {
-  const withDriver = {
+// knex's `browser` field substitution happens when the Worker is bundled,
+// before a driver is ever chosen, so this failure is identical on all five
+// drivers. An earlier version of this message opened by blaming whichever
+// driver the caller had picked, which points them at the one thing that
+// cannot help. `sqlite3` is the probe token because -- unlike `d1` or
+// `libsql` -- it appears nowhere in the hint's own prose, so this assertion
+// fails the moment driver attribution comes back.
+test('hardenMigrationAccessors: the message does not attribute the failure to whichever driver is in use', () => {
+  const target = {
     client: { driverName: 'sqlite3' },
     get migrate(): unknown {
-      throw new TypeError('x')
+      throw new TypeError('Migrator is not a constructor')
     },
   }
-  hardenMigrationAccessors(withDriver)
-  expect(() => withDriver.migrate).toThrowError(/sqlite3/)
-
-  const withoutClient = {
-    get migrate(): unknown {
-      throw new TypeError('x')
-    },
-  }
-  hardenMigrationAccessors(withoutClient)
-  expect(() => withoutClient.migrate).toThrowError(/unknown/)
+  hardenMigrationAccessors(target)
+  expect(() => target.migrate).toThrowError(CfKnexError)
+  expect(() => target.migrate).not.toThrowError(/sqlite3/)
 })

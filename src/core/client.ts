@@ -171,19 +171,6 @@ type KnexClientInstance = Record<string, unknown> & {
   prepBindings(bindings: unknown[]): unknown[]
 }
 
-// Each dialect class this file uses (Client_MySQL2, Client_PG, Client_SQLite3)
-// sets this on its own prototype -- `Object.assign(Client_MySQL2.prototype, {
-// driverName: 'mysql2' })` and the postgres/sqlite3 equivalents
-// (node_modules/knex/lib/dialects/{mysql2,postgres,sqlite3}/index.js) -- so a
-// real knex instance's `.client.driverName` is always a string. The plain
-// object `hardenMigrationAccessors`'s own tests hand it has no `.client` at
-// all, hence the fallback.
-function readDriverName(knexLike: object): string {
-  const client = (knexLike as { client?: unknown }).client
-  const driverName = (client as { driverName?: unknown } | undefined)?.driverName
-  return typeof driverName === 'string' ? driverName : 'unknown'
-}
-
 const MIGRATION_ACCESSORS = [
   ['migrate', 'db.migrate'],
   ['seed', 'db.seed'],
@@ -195,6 +182,11 @@ const MIGRATION_ACCESSORS = [
 // one is ever consulted -- the actual, verified cause (see the module doc
 // comment above `hardenMigrationAccessors`) is knex's own `browser` field
 // substitution, which real wrangler/esbuild honours regardless of source.
+//
+// Nor does it name the driver. The substitution happens when the Worker is
+// bundled, before any driver is chosen, so this fails identically on all
+// five -- attributing it to whichever one the caller picked would send them
+// to change the single thing that cannot help.
 const MIGRATION_UNAVAILABLE_HINT =
   "knex's own package.json 'browser' field maps Migrator/Seeder to a no-op, and real wrangler/esbuild honours that field when bundling for Workers, so this getter cannot construct a real one here. Run migrations/seeds from your own tooling against the database directly instead: `wrangler d1 migrations` for D1, the Turso/libsql CLI, or a plain Node knex process against Postgres/MySQL — never from inside the Worker."
 
@@ -215,7 +207,6 @@ const MIGRATION_UNAVAILABLE_HINT =
  * test in this repo.
  */
 export function hardenMigrationAccessors(target: object): void {
-  const driverName = readDriverName(target)
   for (const [prop, capability] of MIGRATION_ACCESSORS) {
     const descriptor = Object.getOwnPropertyDescriptor(target, prop)
     if (!descriptor || typeof descriptor.get !== 'function') continue
@@ -228,7 +219,7 @@ export function hardenMigrationAccessors(target: object): void {
           return originalGet.call(this)
         } catch (err) {
           if (!(err instanceof TypeError)) throw err
-          throw CfKnexError.unsupported(driverName, capability, MIGRATION_UNAVAILABLE_HINT)
+          throw new CfKnexError('UNSUPPORTED_CAPABILITY', `${capability} is not available inside a Worker. ${MIGRATION_UNAVAILABLE_HINT}`)
         }
       },
     })
