@@ -9,9 +9,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 export const ROW_COUNT = 250
 
 // Extracted here (rather than staying local to test/integration/streaming.ts)
-// so a second dialect's own test file can register the same battery of
-// streaming assertions against its own connection instead of hand-copying
-// them into a parallel implementation.
+// so another test file — e.g. one pointing the same adapter at a different
+// connection/endpoint — can register the same battery of streaming
+// assertions instead of hand-copying them into a parallel implementation.
 export function runStreamingSuite(name: string, factory: () => Knex) {
   describe(`streaming: ${name}`, () => {
     let db: Knex
