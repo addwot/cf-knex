@@ -86,7 +86,8 @@ export type LibsqlAdapterOptions = { url: string; authToken?: string; intMode?: 
  *
  * ## Transactions
  *
- * F1 above is why the naive path fails, not just a fact about transport:
+ * Per-call isolation is why the naive path fails, and it is a property of
+ * the API rather than an artifact of transport:
  * `Client.execute()`'s own doc comment (node_modules/@libsql/client's
  * re-exported `@libsql/core/api`'s `Client` interface) says every statement
  * it runs "is executed in its own logical database connection", and reading
@@ -110,7 +111,7 @@ export type LibsqlAdapterOptions = { url: string; authToken?: string; intMode?: 
  * unmodified inside one. `execute()` below intercepts the transaction-
  * control statements knex emits and, once a `Transaction` exists for a
  * handle, forwards everything else straight to it instead of to the
- * isolated per-call path F1 describes.
+ * isolated per-call path described above.
  */
 export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
   // Every `Client` this adapter's `acquire()` has handed out that `release()`
@@ -283,9 +284,10 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
           await tx.rollback()
           return EMPTY_RESULT
         }
-        // Everything else, including every savepoint statement — F2 proved
+        // Everything else, including every savepoint statement: confirmed
+        // live against both a libsql-server container and Turso that
         // SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE SAVEPOINT need no
-        // translation once a Transaction exists.
+        // translation once a `Transaction` exists.
         return toRawResult(await tx.execute({ sql, args: bindings as unknown as InArgs }))
       }
 
@@ -409,20 +411,23 @@ function toRawResult(res: unknown): RawResult {
 // same style as src/adapters/pg.ts's COMMIT_STATEMENT. Anchoring the end is
 // what keeps ROLLBACK_STATEMENT from matching "ROLLBACK TO SAVEPOINT x" and
 // COMMIT_STATEMENT from matching "RELEASE SAVEPOINT x;" — knex sends the
-// former without a trailing semicolon (F4), so it's optional here, not
-// required. `START TRANSACTION` is not something knex's own sqlite
-// transaction path ever emits (F4) but is accepted alongside `BEGIN;` for
-// whatever a caller's own `db.raw()` sends.
-const BEGIN_STATEMENT = /^(?:BEGIN|START TRANSACTION)\s*;?\s*$/i
+// former without a trailing semicolon, so it's optional here, not required.
+// knex's own sqlite transaction dialect (node_modules/knex/lib/dialects/
+// sqlite3/execution/sqlite-transaction.js) emits only `BEGIN;` and never
+// `START TRANSACTION`, which is accepted anyway for whatever a caller's own
+// `db.raw()` sends. Inner whitespace is `\s+` rather than a literal space so
+// a caller's `db.raw('START  TRANSACTION')` is intercepted rather than
+// silently falling through to the isolated per-call path.
+const BEGIN_STATEMENT = /^(?:BEGIN|START\s+TRANSACTION)\s*;?\s*$/i
 const COMMIT_STATEMENT = /^COMMIT\s*;?\s*$/i
 const ROLLBACK_STATEMENT = /^ROLLBACK\s*;?\s*$/i
-const SET_TRANSACTION_STATEMENT = /^SET TRANSACTION\s+(.+?)\s*;?\s*$/i
+const SET_TRANSACTION_STATEMENT = /^SET\s+TRANSACTION\s+(.+?)\s*;?\s*$/i
 // knex's own `validIsolationLevels` (node_modules/knex/lib/execution/
 // transaction.js) is the exhaustive list of values `setIsolationLevel` ever
 // lets through — it throws before generating any SQL for anything outside
 // this list, so matching exactly these five is not a guess.
-const ISOLATION_LEVEL = /ISOLATION LEVEL\s+(READ UNCOMMITTED|READ COMMITTED|REPEATABLE READ|SERIALIZABLE|SNAPSHOT)/i
-const READ_ONLY_STATEMENT = /READ ONLY/i
+const ISOLATION_LEVEL = /ISOLATION\s+LEVEL\s+(READ\s+UNCOMMITTED|READ\s+COMMITTED|REPEATABLE\s+READ|SERIALIZABLE|SNAPSHOT)/i
+const READ_ONLY_STATEMENT = /READ\s+ONLY/i
 
 // What execute() returns for a transaction-control statement it intercepts
 // instead of sending to libsql — no real ResultSet exists for "BEGIN"
