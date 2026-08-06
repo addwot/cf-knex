@@ -29,3 +29,12 @@ services:
     ports: ['8080:8080']
     environment:
       SQLD_NODE: primary
+    # The image ships no curl or wget, so this is a raw TCP connect through
+    # bash's /dev/tcp rather than an HTTP probe. Matches the CI service
+    # definition in .github/workflows/ci.yml; without it, `docker compose up -d`
+    # returns while sqld is still binding and the first libsql test of a fresh
+    # session can race it, unlike the other three services here.
+    healthcheck:
+      test: ['CMD', 'bash', '-c', 'exec 3<>/dev/tcp/127.0.0.1/8080']
+      interval: 5s
+      retries: 20
