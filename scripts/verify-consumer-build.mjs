@@ -66,6 +66,33 @@ try {
     ),
   )
   execFileSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: consumer, stdio: 'pipe' })
+
+  // Load every entry point from the installed tarball, once through `import`
+  // and once through `require`, and check the export the README tells people
+  // to use is actually there. `publint`/`arethetypeswrong` check the exports
+  // map as data; this checks that Node agrees with it, which is a different
+  // question — a condition pointing at a file that doesn't exist, or a CJS
+  // build whose named exports don't survive the interop, passes the static
+  // checks and fails here. No database is involved: loading the module and
+  // reading a property never opens a connection.
+  for (const entry of ENTRIES) {
+    const check = (source, kind) => {
+      try {
+        execFileSync(process.execPath, ['--input-type=module', '-e', source], { cwd: consumer, stdio: 'pipe' })
+        results.push({ entry: `${entry.name} (${kind})`, ok: true })
+      } catch (err) {
+        results.push({ entry: `${entry.name} (${kind})`, ok: false, output: (err.stdout ?? '') + (err.stderr ?? '') })
+      }
+    }
+    const assertFn = `if (typeof m.createClient !== 'function') { throw new Error('createClient missing from ' + ${JSON.stringify(entry.specifier)}) }`
+    check(`const m = await import(${JSON.stringify(entry.specifier)}); ${assertFn}`, 'import')
+    check(
+      `const { createRequire } = await import('node:module');` +
+        `const m = createRequire(process.cwd() + '/x.js')(${JSON.stringify(entry.specifier)}); ${assertFn}`,
+      'require',
+    )
+  }
+
   mkdirSync(join(consumer, 'src'))
 
   for (const entry of ENTRIES) {
@@ -122,7 +149,8 @@ for (const result of results) {
 }
 
 if (failed) {
-  console.error('\nOne or more entry points failed to bundle under a real `wrangler deploy --dry-run`.')
+  console.error('\nOne or more entry points failed to load from the packed tarball, or to bundle under a real `wrangler deploy --dry-run`.')
   process.exit(1)
 }
-console.log('\nAll entry points bundle cleanly under `wrangler deploy --dry-run`.')
+console.log('\nEvery entry point loads from the packed tarball under both `import` and `require`,')
+console.log('and bundles cleanly under a real `wrangler deploy --dry-run`.')
