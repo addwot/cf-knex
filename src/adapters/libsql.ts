@@ -1,6 +1,6 @@
 import { CfKnexError } from '../core/errors'
 import type { DriverAdapter, RawResult } from '../core/types'
-import type { Client, InArgs, IntMode, ResultSet } from '@libsql/client'
+import type { Client, InArgs, IntMode, ResultSet, Transaction, TransactionMode } from '@libsql/client'
 
 /**
  * `intMode` passes straight through to `@libsql/client`'s own `Config.intMode`
@@ -84,60 +84,33 @@ export type LibsqlAdapterOptions = { url: string; authToken?: string; intMode?: 
  * resultSetFromHrana(rowsResult)` — and the package exposes no cursor or
  * chunked-read API this adapter's optional `stream()` hook could wrap.
  *
- * ## Transactions — verified `false` against a live server, not assumed
+ * ## Transactions
  *
- * Two independent facts, each read from the installed package and then
- * confirmed against the live `libsql` container this project's
- * `docker-compose.yml` starts (`LIBSQL_URL=http://127.0.0.1:8080`), rule out
- * routing knex's BEGIN/COMMIT/ROLLBACK through this adapter's plain
- * `execute(handle, sql, bindings)` surface — regardless of whether one
- * `Client` is shared or a fresh one is handed out per `acquire()` (settled
- * separately above; it doesn't matter for this question either way):
+ * F1 above is why the naive path fails, not just a fact about transport:
+ * `Client.execute()`'s own doc comment (node_modules/@libsql/client's
+ * re-exported `@libsql/core/api`'s `Client` interface) says every statement
+ * it runs "is executed in its own logical database connection", and reading
+ * `HttpClient.execute()` (lib-esm/http.js) shows that's not a metaphor — it
+ * opens a Hrana stream, awaits the one statement, and closes that stream
+ * before `execute()` even resolves. Confirmed live against the docker
+ * container: three sequential `execute()` calls, `"BEGIN"` then an `INSERT`
+ * then `"ROLLBACK"`, report `BEGIN` and the `INSERT` as successes, then
+ * `ROLLBACK` rejects with `LibsqlError: SQLITE_UNKNOWN: SQLite error: cannot
+ * rollback - no transaction is active` — the `BEGIN`'s transaction ended
+ * the moment its own stream closed, so the `INSERT` after it was a plain
+ * autocommit write, already durable by the time `ROLLBACK` discovers there
+ * is nothing left to undo.
  *
- * 1. `Client.execute()`'s own doc comment
- *    (node_modules/@libsql/client's re-exported `@libsql/core/api`'s
- *    `Client` interface) states it plainly: "Every statement executed with
- *    this method is executed in its own logical database connection." Read
- *    at the source, that's not a metaphor —
- *    `HttpClient.execute()` (lib-esm/http.js) opens a brand new Hrana
- *    stream for the single statement (`const stream =
- *    this.#client.openStream()`), awaits its result, and closes that same
- *    stream (`stream.closeGracefully()`) before `execute()` even resolves.
- *    Every call, including one for the literal text `"BEGIN"`, gets its own
- *    stream that is already closed by the time the *next* `execute()` call
- *    — the actual query a transaction would wrap — opens a completely
- *    unrelated one.
- * 2. That closing isn't a harmless implementation detail — a stream is
- *    where the server-side transaction this package's own interactive
- *    `Client.transaction()`/`Transaction` API depends on actually lives
- *    (`HttpTransaction` in the same file keeps its stream open across
- *    multiple `.execute()` calls on the `Transaction` object specifically
- *    *because* closing it ends whatever transaction it was in). Sending
- *    "BEGIN" through the plain, per-call-isolated `Client.execute()` above
- *    begins a transaction on a stream that is gone before the function
- *    returns.
- *
- * Confirmed live, not just read: three sequential `client.execute()` calls —
- * `"BEGIN"`, an `INSERT`, then `"ROLLBACK"` — issued on one shared `Client`
- * against the docker container reproduced exactly the failure mode implied
- * above, and it is the worst one this package's contract has. The `ROLLBACK`
- * call itself rejected with `LibsqlError: SQLITE_UNKNOWN: SQLite error:
- * cannot rollback - no transaction is active` (the `BEGIN`'s transaction had
- * already ended when its own stream closed), and the row inserted "inside"
- * that supposedly-rolled-back transaction was still present afterward — a
- * plain autocommit `INSERT`, not a rollback that silently no-ops but a
- * rollback that silently *cannot even be attempted*, with the write it was
- * meant to undo already durable. `capabilities.transactions: false` reports
- * that faithfully instead of letting `db.transaction()` promise atomicity
- * this driver, reached this way, cannot provide.
- *
- * `hints.transactions` below points at this package's real atomic
- * primitives — `Client.batch()` and `Client.transaction()` — because they
- * exist and are genuinely the fix, unlike a driver with no such option at
- * all: neither is reachable through `DriverAdapter`'s `execute(handle, sql,
- * bindings)` surface (there is no hook here for "this call is actually a
- * batch" or "hold this stream open across calls"), so getting real
- * atomicity means calling `@libsql/client` directly, outside this adapter.
+ * That rules out routing BEGIN/COMMIT/ROLLBACK through plain `execute()`
+ * unchanged; it does not rule out transactions. `Client.transaction(mode)`
+ * opens a real session that stays open across multiple calls on the
+ * `Transaction` object it returns — confirmed live, including a `ROLLBACK`
+ * that actually undoes an insert, a `COMMIT` that keeps one, and savepoints
+ * (`SAVEPOINT`/`ROLLBACK TO SAVEPOINT`/`RELEASE SAVEPOINT`) working
+ * unmodified inside one. `execute()` below intercepts the transaction-
+ * control statements knex emits and, once a `Transaction` exists for a
+ * handle, forwards everything else straight to it instead of to the
+ * isolated per-call path F1 describes.
  */
 export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
   // Every `Client` this adapter's `acquire()` has handed out that `release()`
@@ -147,14 +120,36 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
   // holds; under normal operation that should usually be empty by then.
   const open = new Set<Client>()
 
+  // The `Transaction` currently open on a given handle, if any — knex holds
+  // one handle for a transaction's entire lifetime, which is what lets a
+  // `Transaction` object outlive the single `execute()` call that created it.
+  // `pendingMode` carries a `SET TRANSACTION READ ONLY;` from the statement
+  // that names it to the `BEGIN;` that follows it (see D3 in this adapter's
+  // execute() below) — knex always sends them as two separate calls on the
+  // same handle, in that order, before any transaction exists for it.
+  const activeTx = new WeakMap<Client, Transaction>()
+  const pendingMode = new WeakMap<Client, TransactionMode>()
+
+  // Rolls back and forgets whatever transaction is open on `client`, if any —
+  // shared by `release()` and `destroy()` below, both of which must not hand
+  // or leave a transaction-bearing handle behind them. The map entry is
+  // cleared before the rollback is even awaited, so it is gone regardless of
+  // whether that rollback succeeds; the rollback itself is best-effort here
+  // (unlike the caller-triggered COMMIT/ROLLBACK inside execute() below,
+  // whose own failure must still reach the caller) because there is no
+  // caller left to report it to at this point.
+  async function abandonTransaction(client: Client): Promise<void> {
+    const tx = activeTx.get(client)
+    if (!tx) return
+    activeTx.delete(client)
+    pendingMode.delete(client)
+    await tx.rollback().catch(() => {})
+  }
+
   return {
     dialect: 'sqlite',
     driver: 'libsql',
-    capabilities: { streaming: false, transactions: false },
-    hints: {
-      transactions:
-        "Each execute() call runs on its own, immediately-closed connection (see src/adapters/libsql.ts's doc comment for the live-verified evidence), so BEGIN/COMMIT/ROLLBACK issued through db.transaction() cannot share one. For real atomicity, call @libsql/client's own Client.batch() or Client.transaction() directly, outside cf-knex.",
-    },
+    capabilities: { streaming: false, transactions: true },
 
     async acquire(): Promise<Client> {
       let mod: typeof import('@libsql/client')
@@ -196,6 +191,11 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
     async release(handle: unknown): Promise<void> {
       const client = handle as Client
       open.delete(client)
+      // A caller who runs `db.raw('BEGIN')` (or lets a `db.transaction()`
+      // callback hang) and never commits or rolls back must not hand a
+      // transaction-bearing handle to whatever tarn does with it next — see
+      // `abandonTransaction` above.
+      await abandonTransaction(client)
       client.close()
     },
 
@@ -260,10 +260,61 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
     // return `false` for a truly dead handle, the opposite of what `validate`
     // exists for.
 
+    // BEGIN/COMMIT/ROLLBACK/SAVEPOINT-family statements bracket a real
+    // `Transaction` (see this file's "Transactions" doc comment above)
+    // instead of reaching `client.execute()`'s isolated per-call path.
+    // `activeTx`/`pendingMode` above are keyed by the handle because knex
+    // holds one handle for a transaction's entire lifetime.
     async execute(handle, sql, bindings): Promise<RawResult> {
       const client = handle as Client
-      const res = await client.execute({ sql, args: bindings as unknown as InArgs })
-      return toRawResult(res)
+      const tx = activeTx.get(client)
+
+      if (tx) {
+        // Cleared before the `await`, not after, so a failing COMMIT/ROLLBACK
+        // still ends the transaction as far as this adapter is concerned —
+        // the error itself still propagates to the caller, unmodified.
+        if (COMMIT_STATEMENT.test(sql)) {
+          activeTx.delete(client)
+          await tx.commit()
+          return EMPTY_RESULT
+        }
+        if (ROLLBACK_STATEMENT.test(sql)) {
+          activeTx.delete(client)
+          await tx.rollback()
+          return EMPTY_RESULT
+        }
+        // Everything else, including every savepoint statement — F2 proved
+        // SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE SAVEPOINT need no
+        // translation once a Transaction exists.
+        return toRawResult(await tx.execute({ sql, args: bindings as unknown as InArgs }))
+      }
+
+      if (BEGIN_STATEMENT.test(sql)) {
+        const mode = pendingMode.get(client) ?? 'write'
+        pendingMode.delete(client)
+        activeTx.set(client, await client.transaction(mode))
+        return EMPTY_RESULT
+      }
+
+      // `SET TRANSACTION …;` always precedes `BEGIN;` on the same handle —
+      // see knex's own `Transaction.prototype.begin`
+      // (node_modules/knex/lib/execution/transaction.js) — never arrives
+      // once a transaction is already open, so this only needs checking here.
+      const setTransaction = SET_TRANSACTION_STATEMENT.exec(sql)
+      const trxMode = setTransaction?.[1] ?? ''
+      if (setTransaction) {
+        const isolation = ISOLATION_LEVEL.exec(trxMode)
+        if (isolation)
+          throw CfKnexError.unsupportedTransactionMode(
+            `isolation level '${isolation[1] ?? trxMode}' is not configurable on the libsql driver — SQLite is always serializable. Omit isolationLevel for this driver.`,
+          )
+        if (READ_ONLY_STATEMENT.test(trxMode)) {
+          pendingMode.set(client, 'read')
+          return EMPTY_RESULT
+        }
+      }
+
+      return toRawResult(await client.execute({ sql, args: bindings as unknown as InArgs }))
     },
 
     async destroy(): Promise<void> {
@@ -275,8 +326,15 @@ export function createLibsqlAdapter(opts: LibsqlAdapterOptions): DriverAdapter {
       // `HttpClient.close()` (node_modules/@libsql/hrana-client's
       // `HttpClient`) guards itself with `#setClosed`, which returns
       // immediately if the client is already closed, so re-closing an
-      // already-closed client here is a no-op, not a double-free.
-      for (const client of open) client.close()
+      // already-closed client here is a no-op, not a double-free. Each
+      // client's transaction, if any, is abandoned first — see
+      // `abandonTransaction` above — the same reasoning `release()` applies
+      // to a single handle, applied here to whatever `destroy()` itself is
+      // closing directly.
+      for (const client of open) {
+        await abandonTransaction(client)
+        client.close()
+      }
       open.clear()
     },
   }
@@ -346,3 +404,28 @@ function toRawResult(res: unknown): RawResult {
     affectedRows: rowsAffected,
   }
 }
+
+// Anchored, case-insensitive, tolerating an optional trailing semicolon —
+// same style as src/adapters/pg.ts's COMMIT_STATEMENT. Anchoring the end is
+// what keeps ROLLBACK_STATEMENT from matching "ROLLBACK TO SAVEPOINT x" and
+// COMMIT_STATEMENT from matching "RELEASE SAVEPOINT x;" — knex sends the
+// former without a trailing semicolon (F4), so it's optional here, not
+// required. `START TRANSACTION` is not something knex's own sqlite
+// transaction path ever emits (F4) but is accepted alongside `BEGIN;` for
+// whatever a caller's own `db.raw()` sends.
+const BEGIN_STATEMENT = /^(?:BEGIN|START TRANSACTION)\s*;?\s*$/i
+const COMMIT_STATEMENT = /^COMMIT\s*;?\s*$/i
+const ROLLBACK_STATEMENT = /^ROLLBACK\s*;?\s*$/i
+const SET_TRANSACTION_STATEMENT = /^SET TRANSACTION\s+(.+?)\s*;?\s*$/i
+// knex's own `validIsolationLevels` (node_modules/knex/lib/execution/
+// transaction.js) is the exhaustive list of values `setIsolationLevel` ever
+// lets through — it throws before generating any SQL for anything outside
+// this list, so matching exactly these five is not a guess.
+const ISOLATION_LEVEL = /ISOLATION LEVEL\s+(READ UNCOMMITTED|READ COMMITTED|REPEATABLE READ|SERIALIZABLE|SNAPSHOT)/i
+const READ_ONLY_STATEMENT = /READ ONLY/i
+
+// What execute() returns for a transaction-control statement it intercepts
+// instead of sending to libsql — no real ResultSet exists for "BEGIN"
+// once it's been turned into a `client.transaction()` call, so nothing here
+// should look like one.
+const EMPTY_RESULT: RawResult = { rows: [] }

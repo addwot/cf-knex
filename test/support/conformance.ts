@@ -3,7 +3,16 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { CfKnexError } from '../../src/core/errors'
 import type { AdapterCapabilities } from '../../src/core/types'
 
-export function runConformanceSuite(name: string, factory: () => Knex, caps: AdapterCapabilities) {
+// `singleWriter` describes the *database*, not the adapter, which is why it
+// isn't part of `AdapterCapabilities`: SQLite-family engines (libsql, Turso,
+// D1) permit one write transaction at a time across the whole database, so an
+// open write transaction blocks every other connection's write until it ends.
+// Set it for those backends. It changes only how the concurrent-write case
+// below is expressed — never whether that case's integrity property is
+// checked.
+type ConformanceOptions = AdapterCapabilities & { singleWriter?: boolean }
+
+export function runConformanceSuite(name: string, factory: () => Knex, caps: ConformanceOptions) {
   describe(`conformance: ${name}`, () => {
     let db: Knex
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
@@ -116,7 +125,15 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
       // transaction still holds the only one — see the timeout branch
       // below for what happens then, and why it fails fast with an
       // explanation rather than hanging.
-      test('a concurrent write outside an open transaction is not swallowed by its rollback', async () => {
+      // A single-writer database cannot run this case concurrently at all: the
+      // open write transaction holds a database-wide write lock, so the
+      // "outside" insert below cannot complete until the transaction ends, and
+      // the 2s race would always trip. The serialized variant further down
+      // checks the same integrity property in the only order such a database
+      // permits. Confirmed against both a local libsql-server container and a
+      // live Turso database.
+      const concurrentWriteTest = caps.singleWriter ? test.skip : test
+      concurrentWriteTest('a concurrent write outside an open transaction is not swallowed by its rollback', async () => {
         let releaseGate: () => void = () => {}
         const gate = new Promise<void>((resolve) => {
           releaseGate = resolve
@@ -184,6 +201,45 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Ada
         // rollback) or blocks until the rollback releases a lock it should
         // never have needed to wait on. Either way this row is missing.
         expect(await db(table).where('name', 'ivan-outside').first()).toBeTruthy()
+      })
+
+      // The single-writer counterpart of the case above, checking the same
+      // property — an unrelated write must not be swallowed by a transaction's
+      // rollback — in the only order a database-wide write lock permits. It
+      // deliberately does not assert *when* the outside write lands, because
+      // on such a database that is fixed by the lock rather than by anything
+      // this project controls; it asserts only that it lands and that the
+      // rolled-back row does not.
+      const serializedWriteTest = caps.singleWriter ? test : test.skip
+      serializedWriteTest('a write issued while a transaction is open still lands, and is not swallowed by its rollback', async () => {
+        let releaseGate: () => void = () => {}
+        const gate = new Promise<void>((resolve) => {
+          releaseGate = resolve
+        })
+
+        const trxPromise = db.transaction(async (trx) => {
+          await trx(table).insert({ name: 'judy-inside', score: 9 })
+          await gate
+          throw new Error('rollback')
+        })
+
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // `Promise.resolve()` rather than a bare `await` further down: knex
+        // builders are lazy thenables that don't issue their query until
+        // something calls `.then()`, so binding the builder to a variable
+        // would leave it un-started and defeat the point of issuing it while
+        // the transaction is still open. `Promise.resolve` calls `.then()`
+        // exactly once — attaching a second handler would run the insert
+        // twice (node_modules/knex/lib/builder-interface-augmenter.js).
+        const outsideInsert = Promise.resolve(db(table).insert({ name: 'judy-outside', score: 10 }))
+        releaseGate()
+
+        await expect(trxPromise).rejects.toThrow('rollback')
+        await outsideInsert
+
+        expect(await db(table).where('name', 'judy-inside').first()).toBeFalsy()
+        expect(await db(table).where('name', 'judy-outside').first()).toBeTruthy()
       })
     } else {
       test('transaction throws a documented CfKnexError', async () => {

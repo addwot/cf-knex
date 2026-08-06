@@ -38,6 +38,9 @@ export class CfKnexError extends Error {
     )
   }
 
+  // Covers both halves of what knex can ask for and a driver may not honor:
+  // an isolation level, and `SET TRANSACTION READ ONLY`. One code rather than
+  // one per case, so a caller can branch on `err.code` once.
   static unsupportedTransactionMode(detail: string): CfKnexError {
     return new CfKnexError('UNSUPPORTED_TRANSACTION_MODE', `unsupported transaction mode: ${detail}`)
   }
