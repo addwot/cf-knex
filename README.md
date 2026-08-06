@@ -55,11 +55,11 @@ transactions are knex's own.
 ## Install
 
 ```sh
-npm install cf-knex knex
-# or
 pnpm add cf-knex knex
 # or
 yarn add cf-knex knex
+# or
+npm install cf-knex knex
 ```
 
 Then add the driver for the backend you use. Each is an optional peer dependency; you

@@ -16,11 +16,11 @@ self-hosted cluster — then follow [`../mysql`](../mysql) instead, unchanged.
 ## Install
 
 ```sh
-npm install cf-knex knex @tidbcloud/serverless
-# or
 pnpm add cf-knex knex @tidbcloud/serverless
 # or
 yarn add cf-knex knex @tidbcloud/serverless
+# or
+npm install cf-knex knex @tidbcloud/serverless
 ```
 
 ## Configure

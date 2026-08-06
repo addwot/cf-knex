@@ -17,11 +17,11 @@ cf-knex never routes MariaDB through that dialect. It uses `mysql2`, which Maria
 serves correctly, and the import never appears.
 
 ```sh
-npm install cf-knex knex mysql2
-# or
 pnpm add cf-knex knex mysql2
 # or
 yarn add cf-knex knex mysql2
+# or
+npm install cf-knex knex mysql2
 ```
 
 ## Two ways to connect

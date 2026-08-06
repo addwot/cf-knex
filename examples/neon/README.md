@@ -8,11 +8,11 @@ and its connection limits are worth calling out, not because the code differs.
 ## Install
 
 ```sh
-npm install cf-knex knex pg
-# or
 pnpm add cf-knex knex pg
 # or
 yarn add cf-knex knex pg
+# or
+npm install cf-knex knex pg
 ```
 
 ## Configure

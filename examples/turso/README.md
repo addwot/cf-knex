@@ -7,11 +7,11 @@ auth token.
 ## Install
 
 ```sh
-npm install cf-knex knex @libsql/client
-# or
 pnpm add cf-knex knex @libsql/client
 # or
 yarn add cf-knex knex @libsql/client
+# or
+npm install cf-knex knex @libsql/client
 ```
 
 ## Configure
