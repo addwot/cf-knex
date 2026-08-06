@@ -296,6 +296,17 @@ the driver's own default rather than making every ordinary integer a `bigint` fo
 everyone. If your schema has integer columns that can exceed 2^53, pass
 `createClient({ url, authToken, intMode: 'bigint' })` from `cf-knex/turso`.
 
+**On SQLite-family backends a `Date` is stored as a number.** D1, Turso and libsql
+receive a `Date` binding as `date.valueOf()` — epoch milliseconds — and a `boolean` as
+`1`/`0`, which is exactly what knex's own `better-sqlite3` dialect does, so a codebase
+moving here from knex + better-sqlite3 keeps the values it already has. Read one back
+with `new Date(row.created_at)`. MySQL and Postgres are untouched: their drivers accept
+`Date` and `boolean` natively and encode them for the real column type.
+
+**D1 rejects `bigint` bindings.** `.bind(42n)` throws `D1_TYPE_ERROR` from the binding
+itself. cf-knex does not convert it, because `better-sqlite3` does not either and guessing
+a conversion would silently change what gets stored. Pass a `number` or a string.
+
 **Postgres has no `insertId` at all.** `await db('t').insert({…})` resolves to a pg
 `Result` object, not an array, so destructuring it throws. Use `.returning('id')`, exactly
 as with stock knex against Postgres.
