@@ -1,7 +1,30 @@
-# cf-knex
+# [cf-knex](https://www.npmjs.com/package/cf-knex)
 
-Knex.js query-builder syntax on Cloudflare Workers — TiDB Serverless, MySQL, Postgres, D1
-and Turso, connected directly or through Hyperdrive.
+[![npm version](https://img.shields.io/npm/v/cf-knex.svg)](https://npmjs.org/package/cf-knex)
+[![CI](https://github.com/addwot/cf-knex/actions/workflows/ci.yml/badge.svg)](https://github.com/addwot/cf-knex/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/cf-knex.svg)](LICENSE)
+
+> **Knex.js query-builder syntax on Cloudflare Workers — _no TCP required_.**
+
+A multi-backend (TiDB Cloud Serverless, MySQL, MariaDB, Postgres, Neon, Cloudflare D1,
+Turso) connector for Workers, connected directly or through Hyperdrive, featuring:
+
+- [transactions](#capabilities) on every backend but D1
+- [row streaming](#capabilities) on MySQL and Postgres
+- [Hyperdrive bindings](#postgres-through-hyperdrive) passed straight through
+- [zero configuration](#zero-config-from-bindings) from a D1 or Hyperdrive binding
+- [per-backend entry points](#two-ways-to-import), 2.6–3.3 kB brotli, one adapter each
+- [typed errors](#errors) where a backend cannot do what was asked, never a driver crash
+- a [conformance suite](#tested-against) run against every backend, hosted tiers included
+
+Knex.js 3 (`^3.1.0`) is a peer dependency and does the real work: the query builder,
+schema builder and transactions are Knex.js's own.
+
+- Query-builder documentation lives at [knexjs.org](https://knexjs.org/) — it all applies here
+- A complete Worker per backend: [`examples/`](examples/)
+- Where the backends disagree: [Things that will surprise you](#things-that-will-surprise-you)
+- Report bugs and request features on the [issues page](https://github.com/addwot/cf-knex/issues); [CONTRIBUTING.md](CONTRIBUTING.md) covers pull requests
+- Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ```ts
 import { createClient } from 'cf-knex/tidb'
@@ -204,6 +227,22 @@ import { fromEnv } from 'cf-knex'
 const db = fromEnv(env)
 await db('posts').select('*')
 ```
+
+### Typed rows
+
+The row type goes on the table call, as in stock Knex.js, and `.select()` narrows it to
+the columns you asked for:
+
+```ts
+type User = { id: number; email: string; active: boolean }
+
+const db = createClient({ url: env.TIDB_URL })
+const rows = await db<User>('users').where('active', true).select('id', 'email')
+//    ^? Pick<User, 'id' | 'email'>[]
+```
+
+`createClient<T>` accepts Knex.js's `TRecord` generic too, but that sets the default row
+type for *every* table at once, so the per-call form above is usually what you want.
 
 ## Configuration
 

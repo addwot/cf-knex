@@ -82,6 +82,21 @@ test('README: fromEnv', () => {
   })
 })
 
+// The README's "Typed rows" example. The row generic goes on the table call,
+// knex's own idiom -- `createClient<T>` sets knex's `TRecord` default for every
+// table at once, which is rarely what you want. What this pins is that cf-knex
+// forwards the generic intact, so `.select()` still narrows to the listed
+// columns rather than collapsing to `any[]`.
+type User = { id: number; email: string; active: boolean }
+
+test('README: typed rows', () => {
+  void (async () => {
+    const db = createTidbClient({ url: 'https://example.tidbcloud.com' })
+    const rows = await db<User>('users').where('active', true).select('id', 'email')
+    expectTypeOf(rows).toEqualTypeOf<Pick<User, 'id' | 'email'>[]>()
+  })
+})
+
 test('README: pool override through the knex option', () => {
   void (() => createD1Client({ binding: d1Binding, knex: { pool: { min: 0, max: 2 } } }))
 })

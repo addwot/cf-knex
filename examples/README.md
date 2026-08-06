@@ -1,7 +1,10 @@
-# cf-knex examples
+# [cf-knex](../README.md) examples
 
-One directory per database, each a complete Cloudflare Worker with its own
-`package.json`, `wrangler.jsonc` and README.
+> **One directory per database, each a complete Cloudflare Worker you can `wrangler dev`
+> as-is.**
+
+- Each has its own `package.json`, `wrangler.jsonc`, `src/index.ts` and README
+- [Knex.js query-builder docs](https://knexjs.org/) · [package README](../README.md) · [CONTRIBUTING](../CONTRIBUTING.md)
 
 These are reference material, not a workspace: they are not part of the repo's
 build, they are not published to npm, and they install `cf-knex` from the registry

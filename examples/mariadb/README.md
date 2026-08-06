@@ -1,4 +1,11 @@
-# cf-knex + MariaDB
+# [cf-knex](../../README.md) + MariaDB
+
+> **A Worker querying MariaDB — same code as MySQL, and emphatically not the `mariadb`
+> package.**
+
+- Entry point `cf-knex/mysql` · driver [`mysql2`](https://www.npmjs.com/package/mysql2)
+- Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-mariadb)
+- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
 
 MariaDB speaks the MySQL wire protocol, so it uses the **`mysql2` driver and the
 `cf-knex/mysql` entry point** — same code as [`../mysql`](../mysql).

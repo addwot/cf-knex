@@ -1,4 +1,10 @@
-# cf-knex + Postgres
+# [cf-knex](../../README.md) + Postgres
+
+> **A Worker querying Postgres, by URL or through a Hyperdrive binding.**
+
+- Entry point `cf-knex/postgres` · driver [`pg`](https://www.npmjs.com/package/pg)
+- Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-postgres)
+- [Knex.js query-builder docs](https://knexjs.org/) · [all examples](..) · [package README](../../README.md)
 
 Plain Postgres — self-hosted, RDS, Cloud SQL, anything speaking the wire protocol —
 connected either by URL or through a Hyperdrive binding. For Neon specifically see
