@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "Knex for Cloudflare Workers — MySQL, TiDB, Postgres, D1 and Turso, direct or via Hyperdrive",
   "license": "MIT",
+  "author": "Bogdan Kolesnyk",
   "type": "module",
   "sideEffects": false,
   "packageManager": "pnpm@9.12.0",
