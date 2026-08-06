@@ -181,12 +181,12 @@ test('a remembered isolation level does not survive a BEGIN that failed', async 
 // means the server declined the token and ran the statement in autocommit —
 // outside the transaction, where ROLLBACK cannot reach it.
 function makeSessionFakeHandle(session: string) {
-  const conn = { session }
+  const txConn = { session }
   const txExecute = vi.fn(async () => ({ rows: [], rowsAffected: null, lastInsertId: null }))
-  const tx = { execute: txExecute, rollback: vi.fn(async () => ({ rows: [] })), conn }
+  const tx = { execute: txExecute, rollback: vi.fn(async () => ({ rows: [] })), conn: txConn }
   const begin = vi.fn(async () => tx)
   const execute = vi.fn(async () => ({ rows: [], rowsAffected: null, lastInsertId: null }))
-  return { handle: { execute, begin }, txExecute, conn }
+  return { handle: { execute, begin }, execute, txExecute, txConn }
 }
 
 test('a session token that holds steady through a transaction raises nothing', async () => {
@@ -197,10 +197,10 @@ test('a session token that holds steady through a transaction raises nothing', a
 })
 
 test('a statement whose session changed under it is reported as escaping the transaction', async () => {
-  const { handle, txExecute, conn } = makeSessionFakeHandle('session-1')
+  const { handle, txExecute, txConn } = makeSessionFakeHandle('session-1')
   await adapter.execute(handle, 'BEGIN;', [])
   txExecute.mockImplementationOnce(async () => {
-    conn.session = 'session-2'
+    txConn.session = 'session-2'
     return { rows: [], rowsAffected: null, lastInsertId: null }
   })
 
@@ -210,11 +210,11 @@ test('a statement whose session changed under it is reported as escaping the tra
 })
 
 test('a COMMIT whose session changed under it is reported rather than returned as success', async () => {
-  const { handle, txExecute, conn } = makeSessionFakeHandle('session-1')
+  const { handle, txExecute, txConn } = makeSessionFakeHandle('session-1')
   await adapter.execute(handle, 'BEGIN;', [])
   await adapter.execute(handle, 'insert into t values (1)', [])
   txExecute.mockImplementationOnce(async () => {
-    conn.session = 'session-2'
+    txConn.session = 'session-2'
     return { rows: [], rowsAffected: null, lastInsertId: null }
   })
 
@@ -226,11 +226,32 @@ test('a COMMIT whose session changed under it is reported rather than returned a
   expect(txExecute).toHaveBeenCalledTimes(2)
 })
 
-test('the escape report names the statement kind but never the statement itself', async () => {
-  const { handle, txExecute, conn } = makeSessionFakeHandle('session-1')
+test('a detected escape ends the transaction on that handle rather than stranding it', async () => {
+  const { handle, execute, txExecute, txConn } = makeSessionFakeHandle('session-1')
   await adapter.execute(handle, 'BEGIN;', [])
   txExecute.mockImplementationOnce(async () => {
-    conn.session = 'session-2'
+    txConn.session = 'session-2'
+    return { rows: [], rowsAffected: null, lastInsertId: null }
+  })
+  await expect(adapter.execute(handle, 'insert into t values (1)', [])).rejects.toMatchObject({
+    code: 'TRANSACTION_ESCAPED',
+  })
+
+  // The transaction is gone server-side, so the handle must stop routing
+  // through the dead `Tx`. Left set, the caller's own cleanup goes to a
+  // transaction that no longer exists — and on a `pool: { max: 1 }` client,
+  // where cleanup necessarily reuses this handle, that hangs instead of
+  // surfacing the escape.
+  await adapter.execute(handle, 'drop table t', [])
+  expect(execute).toHaveBeenCalledWith('drop table t', [], { fullResult: true })
+  expect(txExecute).toHaveBeenCalledTimes(1)
+})
+
+test('the escape report names the statement kind but never the statement itself', async () => {
+  const { handle, txExecute, txConn } = makeSessionFakeHandle('session-1')
+  await adapter.execute(handle, 'BEGIN;', [])
+  txExecute.mockImplementationOnce(async () => {
+    txConn.session = 'session-2'
     return { rows: [], rowsAffected: null, lastInsertId: null }
   })
 

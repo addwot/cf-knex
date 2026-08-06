@@ -166,11 +166,23 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
         // ROLLBACK TO SAVEPOINT, RELEASE SAVEPOINT, and COMMIT all pass
         // through `tx.execute()` unmodified.
         const result = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
-        // Checked after every in-transaction statement, not just writes: by
-        // the time one has escaped, a SELECT is reading outside the
-        // transaction's snapshot too, and the caller has no other signal
-        // that it happened.
-        assertSameSession(state.session, tx, sql)
+        try {
+          // Checked after every in-transaction statement, not just writes: by
+          // the time one has escaped, a SELECT is reading outside the
+          // transaction's snapshot too, and the caller has no other signal
+          // that it happened.
+          assertSameSession(state.session, tx, sql)
+        } catch (err) {
+          // The transaction this handle believed it held no longer exists on
+          // the server. Forgetting it is not bookkeeping tidiness: without
+          // this, every later statement on this handle — including the
+          // caller's own cleanup, and `release()`'s rollback — is still
+          // routed into that dead `Tx`. On a `pool: { max: 1 }` client, where
+          // cleanup necessarily reuses this same handle, that turns a
+          // detected escape into a hang.
+          txStates.delete(conn)
+          throw err
+        }
         return result
       }
 
