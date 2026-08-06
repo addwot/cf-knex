@@ -20,7 +20,11 @@ export default tseslint.config(
     // requires declaration merging — only `interface` supports that, `type`
     // cannot merge. Scope the house-style rule off for test/** so that file
     // doesn't trip it.
-    files: ['test/**/*.ts'],
+    // Scoped to this one file, not `test/**`: declaration merging is the only
+    // reason to reach for `interface` here, and env.d.ts is the only file that
+    // needs it. A directory-wide exemption would quietly let the house style
+    // lapse across every other test file.
+    files: ['test/env.d.ts'],
     rules: {
       '@typescript-eslint/consistent-type-definitions': 'off',
     },
