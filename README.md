@@ -311,39 +311,10 @@ statements as one atomic unit.
 
 ## Things that will surprise you
 
-These are measured behaviours, not theory. Each one is covered by a test.
+Measured behaviours, each covered by a test.
 
-**TiDB Cloud Serverless transactions over HTTP work, but not the way you would build
-them.**
-`@tidbcloud/serverless`'s `Connection.begin()` returns a *brand-new* `Connection` rather
-than mutating the one you called it on. Knex.js issues `BEGIN`/`COMMIT`/`ROLLBACK` as plain
-SQL on the single handle it holds for the transaction's lifetime, so passed through
-naively each would run on its own throwaway session, and every write inside the block
-would land outside the transaction while looking perfectly successful. cf-knex intercepts
-them and drives the real `Tx` object, forwarding everything else (savepoints included) to
-it unchanged.
-
-**TiDB Cloud Serverless over HTTP cannot stream.** `Connection.execute()` awaits `response.json()` in
-full; the package exposes no cursor or chunked-read API to wrap, so `.stream()` throws
-`UNSUPPORTED_CAPABILITY` rather than quietly buffering the whole result and pretending.
-If you need real streaming from TiDB, reach the cluster over the MySQL wire protocol
-through Hyperdrive with `cf-knex/mysql`.
-
-**Migrations and seeds do not run inside a Worker.** Knex.js's `package.json` maps its
-`Migrator` and `Seeder` modules to a no-op through the `browser` field, and real
-wrangler/esbuild honours that — Knex.js's own packaging, not something cf-knex can work
-around from library code. All cf-knex can do is make the failure legible: instead of a
-bare `TypeError: Migrator is not a constructor`, `db.migrate`/`db.seed` throw
-`CfKnexError` with code `UNSUPPORTED_CAPABILITY`. Run migrations from Node or CI against
-the same database — with stock Knex.js, or `wrangler d1 migrations apply` for D1. Schema
-building at runtime (`db.schema.createTable(…)`) works fine on every backend.
-
-**`insertId` may be a `bigint`.** TiDB's `AUTO_RANDOM`, 64-bit auto-increment columns and
-libsql's `lastInsertRowid` all exceed 2^53, so cf-knex does not narrow them to `number`
-and lose precision. Wrap it — `Number(id)` — rather than assuming either type.
-
-**Aggregates come back as strings on most backends, and which ones differ per backend.**
-Every driver here encodes results that can exceed 2^53 as decimal strings rather than lose
+**Aggregates come back as strings on most backends, and which ones differs per backend.**
+Every driver encodes results that can exceed 2^53 as decimal strings rather than lose
 precision, but they disagree about where that line falls:
 
 | | `count()` | `sum()` | `avg()` | `max()` / `min()` |
@@ -353,66 +324,69 @@ precision, but they disagree about where that line falls:
 | `mysql2` | `2` | `'5'` | `'2.5000'` | `3` |
 | `libsql` / D1 | `2` | `5` | `2.5` | `3` |
 
-Measured, not inferred — the same query on each backend. It bites on arithmetic and on
-`===`: `count > 10` compares strings, and `count === 0` is never true. Wrap every
-aggregate except `max`/`min` in `Number()`. The trap is `mysql2`'s row: a number for
-`count()` but a string for `sum()`, so code written against MySQL and moved to TiDB
-Serverless or Postgres breaks on `count` specifically.
+`count > 10` compares strings and `count === 0` is never true, so wrap everything but
+`max`/`min` in `Number()`. The trap is `mysql2`: a number for `count()` but a string for
+`sum()`, so code written against MySQL breaks on `count` specifically when it moves to
+TiDB Serverless or Postgres.
 
-**Large integer *columns* need `intMode` on Turso/libsql.** The libsql driver defaults to
-`intMode: 'number'`, and decoding a column value above `Number.MAX_SAFE_INTEGER` under
-that mode throws a bare `RangeError` from the driver, not a `CfKnexError`. cf-knex keeps
-the driver's own default rather than making every ordinary integer a `bigint` for
-everyone. If your schema has integer columns that can exceed 2^53, pass
-`createClient({ url, authToken, intMode: 'bigint' })` from `cf-knex/turso`.
+**`insertId` may be a `bigint`.** TiDB's `AUTO_RANDOM`, 64-bit auto-increment columns and
+libsql's `lastInsertRowid` all exceed 2^53, so they are not narrowed to `number`. Wrap
+with `Number(id)` rather than assuming either type.
 
-**On SQLite-family backends a `Date` is stored as a number.** D1, Turso and libsql
-receive a `Date` binding as `date.valueOf()` — epoch milliseconds — and a `boolean` as
-`1`/`0`, which is exactly what Knex.js's own `better-sqlite3` dialect does, so a codebase
-moving here from Knex.js + better-sqlite3 keeps the values it already has. Read one back
-with `new Date(row.created_at)`. MySQL and Postgres are untouched: their drivers accept
-`Date` and `boolean` natively and encode them for the real column type.
+**Postgres has no `insertId` at all.** `insert()` resolves to a pg `Result` object, not an
+array, so destructuring it throws. Use `.returning('id')`, as with stock Knex.js.
 
-**D1 rejects `bigint` bindings.** `.bind(42n)` throws `D1_TYPE_ERROR` from the binding
-itself. cf-knex does not convert it, because `better-sqlite3` does not either and guessing
-a conversion would silently change what gets stored. Pass a `number` or a string.
+**Migrations and seeds do not run inside a Worker.** Knex.js's `browser` field maps its
+`Migrator` and `Seeder` to a no-op and wrangler honours it, so `db.migrate`/`db.seed`
+throw `UNSUPPORTED_CAPABILITY` instead of a bare `TypeError: Migrator is not a
+constructor`. Run them from Node or CI against the same database, or
+`wrangler d1 migrations apply` for D1. Runtime schema building
+(`db.schema.createTable(…)`) works everywhere.
 
-**Postgres has no `insertId` at all.** `await db('t').insert({…})` resolves to a pg
-`Result` object, not an array, so destructuring it throws. Use `.returning('id')`, exactly
-as with stock Knex.js against Postgres.
+**TiDB Serverless transactions over HTTP are intercepted.** `@tidbcloud/serverless`'s
+`Connection.begin()` returns a *new* connection instead of mutating the one you hold, so
+Knex.js's plain `BEGIN`/`COMMIT`/`ROLLBACK` would each run on a throwaway session and every
+write would land outside the transaction while looking successful. cf-knex drives the real
+`Tx` object instead, savepoints included.
+
+**TiDB Serverless over HTTP cannot stream.** The driver awaits `response.json()` in full
+and exposes no cursor, so `.stream()` throws rather than buffering the whole result and
+pretending. Reach the cluster through Hyperdrive with `cf-knex/mysql` if you need it.
+
+**Large integer columns need `intMode: 'bigint'` on Turso/libsql**, passed to
+`createClient` from `cf-knex/turso`. The driver defaults to `'number'` and throws a bare
+`RangeError` — not a `CfKnexError` — above `Number.MAX_SAFE_INTEGER`.
+
+**On SQLite-family backends a `Date` is stored as a number** (`date.valueOf()`, epoch
+milliseconds) and a `boolean` as `1`/`0`, matching Knex.js's own `better-sqlite3` dialect.
+Read one back with `new Date(row.created_at)`. **D1 also rejects `bigint` bindings** with
+`D1_TYPE_ERROR`; pass a `number` or a string. MySQL and Postgres are untouched.
 
 **A Postgres `COMMIT` can silently roll back.** If a statement inside the transaction
 already aborted it, Postgres executes the `COMMIT` as a `ROLLBACK` and reports success.
-cf-knex detects this and throws `COMMIT_SILENTLY_ROLLED_BACK` instead of letting a
-transaction that discarded its writes look like one that committed.
+cf-knex throws `COMMIT_SILENTLY_ROLLED_BACK` instead.
 
-**SQLite-family databases allow one writer at a time.** On D1, Turso and libsql an open
-write transaction blocks every other write across the whole database until it ends. Code
-that assumes two concurrent writes can interleave will serialise instead.
-
-**Every backend is reached through a driver, not a shim.** `db.raw()` returns that
-driver's own shape, normalised only where Knex.js itself requires it.
+**SQLite-family databases allow one writer at a time**, so concurrent writes on D1, Turso
+and libsql serialise rather than interleave. And `db.raw()` returns the driver's own
+shape, normalised only where Knex.js itself requires it.
 
 ## Lifetime
 
 Create the client inside the request handler and destroy it at the end. Do not cache one
 in a module-level global: workerd rejects reusing I/O objects across requests with
-`Cannot perform I/O on behalf of a different request`. This costs less than it sounds —
-Hyperdrive pools server-side, and D1, Turso and TiDB Serverless over HTTP have no connection to
+`Cannot perform I/O on behalf of a different request`. It costs less than it sounds —
+Hyperdrive pools server-side, and D1, Turso and TiDB over HTTP have no connection to
 re-establish.
 
-**How much `destroy()` matters depends on the backend.** On `mysql2`, `pg` and `libsql` it
-ends real sockets that would otherwise be left for the server to time out. On D1 and TiDB
-Serverless over HTTP it is an empty function — no socket, no server-side session. The
-examples call it everywhere so that switching backends never turns a no-op into a leak.
+cf-knex cannot call `destroy()` for you: it never sees your `Response`, and closing after
+each query would break transactions. `ctx.waitUntil(db.destroy())` works if you would
+rather not `await` it. It ends real sockets on `mysql2`, `pg` and `libsql` and is an empty
+function on D1 and TiDB over HTTP — the examples call it everywhere so that switching
+backends never turns a no-op into a leak.
 
-cf-knex cannot call it for you: it never sees your `Response`, and closing after each
-query would break transactions. `ctx.waitUntil(db.destroy())` works if you would rather
-not `await` it.
-
-The internal pool defaults to `{ min: 0, max: 5 }` rather than Knex.js's `{ min: 2, max: 10 }`,
+The pool defaults to `{ min: 0, max: 5 }` rather than Knex.js's `{ min: 2, max: 10 }`,
 because a `min` above zero pins connections open for the life of the client. Override it
-through `knex: { pool: { … } }` if your usage differs.
+through `knex: { pool: { … } }`.
 
 ## Errors
 
@@ -445,21 +419,20 @@ try {
 | `MALFORMED_DRIVER_RESULT` | The driver returned a shape cf-knex could not read |
 | `INCOMPATIBLE_KNEX` | The installed Knex.js does not expose what cf-knex needs |
 
-Where cf-knex puts a connection URL into one of its own messages, the credentials are
-stripped first. Both places a secret rides in a URL are covered — the userinfo section and
-the query string:
+Where cf-knex puts a connection URL into one of its own messages, credentials are stripped
+first — both places a secret rides in a URL, and every query value rather than only the
+ones whose names look like credentials:
 
 ```
 cannot infer a driver from url 'oracle://***@host/db' — set driver explicitly
 cannot infer a driver from url 'https://db.turso.io/?authToken=***' — set driver explicitly
 ```
 
-Every query value is masked, not just parameters whose names look like credentials.
-
 ## Tested against
 
-Every backend below runs the same conformance suite. Local runs use Docker; the hosted
-tiers run in CI against real services.
+Every backend below runs the same conformance suite, against both ends of the declared
+Knex.js peer range (3.1.0 and 3.3.0). Local runs use Docker; the hosted tiers run in CI
+against real services.
 
 | Backend | How |
 |---|---|
@@ -472,20 +445,15 @@ tiers run in CI against real services.
 | Neon | live, both the pooler and the direct endpoint |
 | Neon behind a real Hyperdrive binding | live, `wrangler dev --remote` |
 
-The two "Hyperdrive-shaped config" rows use `localConnectionString`, which gives the
-binding's *shape* but connects straight to Docker — they prove the code path, not the
-product. The last row is a real Hyperdrive configuration driven from a Worker: DDL,
-`insert … returning`, a committed and a rolled-back transaction, streaming and aggregates
-all behaved as they do direct.
+The two "Hyperdrive-shaped config" rows use `localConnectionString`: the binding's *shape*,
+connected straight to Docker. They prove the code path, not the product — the last row is
+a real Hyperdrive configuration, driven from a Worker.
 
-The suite also runs against both ends of the declared Knex.js peer range (3.1.0 and 3.3.0).
-
-D1, libsql and TiDB Serverless over HTTP are exercised *inside* workerd. `mysql2` and `pg`
-are not: `@cloudflare/vitest-pool-workers` cannot import either package, a documented
-limitation of that test pool rather than of Workers. Their conformance suites run under
-Node, and their behaviour on workerd was established separately with `wrangler dev`
-against a live MySQL — outbound TCP, buffered queries and row streaming all work. Every
-entry point is additionally built with real wrangler on each push.
+`mysql2` and `pg` suites run under Node because `@cloudflare/vitest-pool-workers` cannot
+import either package, a limitation of that test pool rather than of Workers; their
+behaviour on workerd was checked separately with `wrangler dev` against a live MySQL. D1,
+libsql and TiDB over HTTP are exercised inside workerd, and every entry point is built
+with real wrangler on each push.
 
 ## Development
 
