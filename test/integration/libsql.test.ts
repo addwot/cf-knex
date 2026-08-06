@@ -196,9 +196,9 @@ function runLibsqlTransactionTests(name: string, adapterOptions: LibsqlAdapterOp
 // `valueToProto`) already converts a `Date` to `+value.valueOf()` and a
 // `boolean` to an integer independently of anything this project does --
 // this test would still pass with `prepBindings` reverted to a no-op. It's
-// kept anyway as the real end-to-end confirmation the "verification
-// required" section of this fix asked for: that a Date/boolean insert
-// through this adapter genuinely works and reads back the right type, not
+// kept anyway as the end-to-end confirmation the unit tests cannot give:
+// that a Date/boolean insert through this adapter genuinely works against a
+// real libsql server and reads back the right type, not
 // merely that `prepBindings` produces the right array in isolation (the
 // unit tests in test/unit/client.test.ts already cover that, and are what
 // actually catches a regression in this code path). What this test *would*
