@@ -9,6 +9,7 @@ export type CfKnexErrorCode =
   | 'MALFORMED_DRIVER_RESULT'
   | 'COMMIT_SILENTLY_ROLLED_BACK'
   | 'UNSUPPORTED_TRANSACTION_MODE'
+  | 'TRANSACTION_ESCAPED'
 
 export class CfKnexError extends Error {
   readonly code: CfKnexErrorCode
@@ -35,6 +36,19 @@ export class CfKnexError extends Error {
     return new CfKnexError(
       'COMMIT_SILENTLY_ROLLED_BACK',
       `COMMIT did not take effect: the connection's transaction was already aborted, so the database executed this COMMIT as a ROLLBACK instead. ${detail}`,
+    )
+  }
+
+  // A statement that was meant to run inside an open transaction was executed
+  // by the server outside it, where COMMIT/ROLLBACK can no longer govern it.
+  // The failure this exists for is silent: the write succeeds, the caller's
+  // rollback reports success, and the row is still there afterwards. Raised
+  // rather than tolerated because there is no safe way to continue — the
+  // transaction's atomicity is already gone by the time it is detectable.
+  static transactionEscaped(detail: string): CfKnexError {
+    return new CfKnexError(
+      'TRANSACTION_ESCAPED',
+      `a statement escaped its transaction and was applied outside it — ROLLBACK will NOT undo it. ${detail}`,
     )
   }
 

@@ -172,3 +172,83 @@ test('a remembered isolation level does not survive a BEGIN that failed', async 
   await adapter.execute(handle, 'BEGIN;', [])
   expect(begin).toHaveBeenLastCalledWith(undefined)
 })
+
+// The `Tx` the real driver hands back holds a `conn` whose `session` is the
+// `TiDB-Session` header token identifying the server-side transaction. It is
+// reassigned from every response, and a live probe against TiDB Cloud
+// Serverless confirmed it stays byte-identical for a transaction's whole
+// lifetime, terminating COMMIT/ROLLBACK included. So a change mid-transaction
+// means the server declined the token and ran the statement in autocommit —
+// outside the transaction, where ROLLBACK cannot reach it.
+function makeSessionFakeHandle(session: string) {
+  const conn = { session }
+  const txExecute = vi.fn(async () => ({ rows: [], rowsAffected: null, lastInsertId: null }))
+  const tx = { execute: txExecute, rollback: vi.fn(async () => ({ rows: [] })), conn }
+  const begin = vi.fn(async () => tx)
+  const execute = vi.fn(async () => ({ rows: [], rowsAffected: null, lastInsertId: null }))
+  return { handle: { execute, begin }, txExecute, conn }
+}
+
+test('a session token that holds steady through a transaction raises nothing', async () => {
+  const { handle } = makeSessionFakeHandle('session-1')
+  await adapter.execute(handle, 'BEGIN;', [])
+  await adapter.execute(handle, 'insert into t values (1)', [])
+  await expect(adapter.execute(handle, 'COMMIT;', [])).resolves.toBeTruthy()
+})
+
+test('a statement whose session changed under it is reported as escaping the transaction', async () => {
+  const { handle, txExecute, conn } = makeSessionFakeHandle('session-1')
+  await adapter.execute(handle, 'BEGIN;', [])
+  txExecute.mockImplementationOnce(async () => {
+    conn.session = 'session-2'
+    return { rows: [], rowsAffected: null, lastInsertId: null }
+  })
+
+  await expect(adapter.execute(handle, 'insert into t values (1)', [])).rejects.toMatchObject({
+    code: 'TRANSACTION_ESCAPED',
+  })
+})
+
+test('a COMMIT whose session changed under it is reported rather than returned as success', async () => {
+  const { handle, txExecute, conn } = makeSessionFakeHandle('session-1')
+  await adapter.execute(handle, 'BEGIN;', [])
+  await adapter.execute(handle, 'insert into t values (1)', [])
+  txExecute.mockImplementationOnce(async () => {
+    conn.session = 'session-2'
+    return { rows: [], rowsAffected: null, lastInsertId: null }
+  })
+
+  await expect(adapter.execute(handle, 'COMMIT;', [])).rejects.toMatchObject({ code: 'TRANSACTION_ESCAPED' })
+  // The transaction still ended on this handle: the escape is not recoverable,
+  // and leaving the entry behind would route the caller's next statement into
+  // a transaction it believes is closed.
+  await adapter.execute(handle, 'select 1', [])
+  expect(txExecute).toHaveBeenCalledTimes(2)
+})
+
+test('the escape report names the statement kind but never the statement itself', async () => {
+  const { handle, txExecute, conn } = makeSessionFakeHandle('session-1')
+  await adapter.execute(handle, 'BEGIN;', [])
+  txExecute.mockImplementationOnce(async () => {
+    conn.session = 'session-2'
+    return { rows: [], rowsAffected: null, lastInsertId: null }
+  })
+
+  // Raw SQL can carry inlined literals that bindings would otherwise keep out
+  // of reach, and error messages travel to logs.
+  const escaped = adapter
+    .execute(handle, "insert into accounts (token) values ('hunter2')", [])
+    .catch((err: Error) => err.message)
+  await expect(escaped).resolves.toContain('an INSERT statement')
+  await expect(escaped).resolves.not.toContain('hunter2')
+})
+
+test('a driver that does not expose a session is not treated as an escape', async () => {
+  // The published driver could stop surfacing `conn.session`, or surface it
+  // only on some responses. Either way the check has nothing to compare and
+  // must stay silent rather than fail every transaction.
+  const { handle } = makeFakeHandle()
+  await adapter.execute(handle, 'BEGIN;', [])
+  await adapter.execute(handle, 'insert into t values (1)', [])
+  await expect(adapter.execute(handle, 'COMMIT;', [])).resolves.toBeTruthy()
+})

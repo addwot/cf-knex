@@ -221,7 +221,21 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Con
         }
 
         await expect(trxPromise).rejects.toThrow('rollback')
-        expect(await db(table).where('name', 'ivan-inside').first()).toBeFalsy()
+
+        // Not `expect(...).toBeFalsy()`: this exact assertion has failed on CI
+        // against TiDB Cloud Serverless — the rolled-back row survived — and
+        // resisted 49 local reproduction attempts across parallel load and
+        // injected latency up to 1.5s, so the next occurrence has to be
+        // diagnosable from the CI log alone. `toBeFalsy` reports only
+        // "expected { Object } to be falsy", which distinguishes none of the
+        // candidate causes; the table's actual contents and ids do.
+        const inside = await db(table).where('name', 'ivan-inside').first()
+        if (inside) {
+          const rows = await db(table).select('*').orderBy('id')
+          throw new Error(
+            `a row inserted inside a transaction survived that transaction's ROLLBACK. The transaction rejected as expected, so knex issued ROLLBACK and the driver reported it succeeded. Table contents now: ${JSON.stringify(rows)}`,
+          )
+        }
         // The assertion a shared connection fails: with one session for
         // both the transaction and this insert, the insert either lands
         // inside the still-open transaction (and vanishes with the

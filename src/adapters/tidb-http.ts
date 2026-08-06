@@ -19,6 +19,33 @@ type TidbConnection = {
 type TidbTx = {
   execute(query: string, args: unknown[], options: { fullResult: true }): Promise<FullResult>
   rollback(): Promise<unknown>
+  // Driver internal, read-only and optional on purpose — see `sessionOf()`.
+  conn?: { session?: string | null }
+}
+
+// The `TiDB-Session` token identifying the server-side session a statement
+// runs in. `Connection.execute()` sends whatever it currently holds and then
+// overwrites it from the response, unconditionally
+// (node_modules/@tidbcloud/serverless/dist/index.js) — so if the server ever
+// declines to recognize the token, it runs that statement in autocommit,
+// hands back a different session, and the driver silently adopts it. Nothing
+// throws, and the statement is now outside the transaction the caller
+// believes it is in.
+//
+// Verified against a live TiDB Cloud Serverless cluster before this was
+// relied on: the token is allocated by `BEGIN` and is byte-identical across
+// every statement of that transaction, including its terminating
+// COMMIT/ROLLBACK, and differs between transactions. It is not rotated per
+// response, so a change mid-transaction is never normal.
+//
+// Optional chaining rather than a hard read: `conn`/`session` are the
+// driver's internals, not its public API, and this adapter's peer range
+// (`>=0.2.0`) admits versions that may not shape them this way. A driver
+// that no longer exposes the token returns `undefined` here, which
+// `assertSameSession` treats as "cannot check" and skips — degrading to the
+// previous behaviour rather than throwing on every query.
+function sessionOf(tx: TidbTx): string | null | undefined {
+  return tx.conn?.session
 }
 
 export type TidbHttpAdapterOptions = { url: string }
@@ -28,7 +55,34 @@ export type TidbHttpAdapterOptions = { url: string }
 // hasn't reached a `begin()` call yet. A `WeakMap` keyed by handle scopes
 // this to each `Connection` `acquire()` hands out — never shared, so no
 // cross-handle bleed — and lets an evicted handle's entry be collected.
-type TxState = { tx?: TidbTx; pendingIsolation?: Isolation }
+type TxState = { tx?: TidbTx; session?: string | null; pendingIsolation?: Isolation }
+
+// Throws if `tx` is no longer on the session it was opened with, meaning the
+// statement just executed did not run inside the transaction. `expected` is
+// the token recorded at BEGIN; `undefined` on either side means the driver
+// does not expose it and the check is skipped rather than guessed at.
+//
+// The tokens themselves never reach the message: they authenticate a live
+// server-side session, so they are credentials, and this project's rule is
+// that credentials never reach an error or a log (see `redact()` in
+// ../core/infer.ts).
+function assertSameSession(expected: string | null | undefined, tx: TidbTx, sql: string): void {
+  if (expected === undefined || expected === null) return
+  const actual = sessionOf(tx)
+  if (actual === undefined || actual === expected) return
+  throw CfKnexError.transactionEscaped(
+    `the TiDB session changed while running ${describeStatement(sql)}, so the server ran it in autocommit rather than in this transaction. This is a TiDB Cloud Serverless HTTP behaviour, not a query error; retry the whole transaction.`,
+  )
+}
+
+// Statement kinds, not statement text: the SQL knex generates carries table
+// and column names, and bound values are already separate, but an inlined
+// literal in a raw query would otherwise land in an error message.
+function describeStatement(sql: string): string {
+  const verb = /^\s*([A-Za-z]+)/.exec(sql)?.[1]?.toUpperCase()
+  if (!verb) return 'a statement'
+  return `${/^[AEIOU]/.test(verb) ? 'an' : 'a'} ${verb} statement`
+}
 
 // A `DriverAdapter` over `@tidbcloud/serverless` 0.3.0's HTTP driver for
 // TiDB Cloud Serverless.
@@ -92,7 +146,12 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
         const { tx } = state
         if (COMMIT_STATEMENT.test(sql) || ROLLBACK_STATEMENT.test(sql)) {
           try {
-            return toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
+            const ended = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
+            // A COMMIT that escaped is the worst case of all: it reports
+            // success while the writes it was meant to make durable were
+            // already applied (or lost) outside its control.
+            assertSameSession(state.session, tx, sql)
+            return ended
           } finally {
             // Ends the transaction on this handle regardless of outcome — a
             // failed COMMIT still ends it, and leaving `state.tx` behind
@@ -106,7 +165,13 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
         // live against a real TiDB Cloud Serverless cluster: SAVEPOINT,
         // ROLLBACK TO SAVEPOINT, RELEASE SAVEPOINT, and COMMIT all pass
         // through `tx.execute()` unmodified.
-        return toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
+        const result = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
+        // Checked after every in-transaction statement, not just writes: by
+        // the time one has escaped, a SELECT is reading outside the
+        // transaction's snapshot too, and the caller has no other signal
+        // that it happened.
+        assertSameSession(state.session, tx, sql)
+        return result
       }
 
       if (BEGIN_STATEMENT.test(sql)) {
@@ -117,7 +182,10 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
         // on this handle.
         txStates.delete(conn)
         const tx = await conn.begin(isolation ? { isolation } : undefined)
-        txStates.set(conn, { tx })
+        // Recorded here rather than read fresh on each statement: this is the
+        // session BEGIN allocated, and every later statement on this
+        // transaction must still be on it.
+        txStates.set(conn, { tx, session: sessionOf(tx) })
         return { rows: [] }
       }
 
