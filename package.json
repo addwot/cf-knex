@@ -1,54 +1,121 @@
 {
   "name": "cf-knex",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Knex for Cloudflare Workers — TiDB Serverless, MySQL, Postgres, D1 and Turso, direct or via Hyperdrive",
   "license": "MIT",
   "author": "Bogdan Kolesnyk",
   "type": "module",
   "sideEffects": false,
   "packageManager": "pnpm@11.20.0",
-  "engines": { "node": ">=22" },
-  "repository": { "type": "git", "url": "git+https://github.com/addwot/cf-knex.git" },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/addwot/cf-knex.git"
+  },
   "homepage": "https://github.com/addwot/cf-knex#readme",
-  "bugs": { "url": "https://github.com/addwot/cf-knex/issues" },
-  "keywords": ["knex", "cloudflare", "workers", "d1", "hyperdrive", "tidb", "turso", "mysql", "postgres", "edge"],
-  "files": ["dist", "CHANGELOG.md"],
+  "bugs": {
+    "url": "https://github.com/addwot/cf-knex/issues"
+  },
+  "keywords": [
+    "knex",
+    "cloudflare",
+    "workers",
+    "d1",
+    "hyperdrive",
+    "tidb",
+    "turso",
+    "mysql",
+    "postgres",
+    "edge"
+  ],
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./mysql": {
-      "import": { "types": "./dist/mysql.d.ts", "default": "./dist/mysql.js" },
-      "require": { "types": "./dist/mysql.d.cts", "default": "./dist/mysql.cjs" }
+      "import": {
+        "types": "./dist/mysql.d.ts",
+        "default": "./dist/mysql.js"
+      },
+      "require": {
+        "types": "./dist/mysql.d.cts",
+        "default": "./dist/mysql.cjs"
+      }
     },
     "./postgres": {
-      "import": { "types": "./dist/postgres.d.ts", "default": "./dist/postgres.js" },
-      "require": { "types": "./dist/postgres.d.cts", "default": "./dist/postgres.cjs" }
+      "import": {
+        "types": "./dist/postgres.d.ts",
+        "default": "./dist/postgres.js"
+      },
+      "require": {
+        "types": "./dist/postgres.d.cts",
+        "default": "./dist/postgres.cjs"
+      }
     },
     "./tidb": {
-      "import": { "types": "./dist/tidb.d.ts", "default": "./dist/tidb.js" },
-      "require": { "types": "./dist/tidb.d.cts", "default": "./dist/tidb.cjs" }
+      "import": {
+        "types": "./dist/tidb.d.ts",
+        "default": "./dist/tidb.js"
+      },
+      "require": {
+        "types": "./dist/tidb.d.cts",
+        "default": "./dist/tidb.cjs"
+      }
     },
     "./d1": {
-      "import": { "types": "./dist/d1.d.ts", "default": "./dist/d1.js" },
-      "require": { "types": "./dist/d1.d.cts", "default": "./dist/d1.cjs" }
+      "import": {
+        "types": "./dist/d1.d.ts",
+        "default": "./dist/d1.js"
+      },
+      "require": {
+        "types": "./dist/d1.d.cts",
+        "default": "./dist/d1.cjs"
+      }
     },
     "./turso": {
-      "import": { "types": "./dist/turso.d.ts", "default": "./dist/turso.js" },
-      "require": { "types": "./dist/turso.d.cts", "default": "./dist/turso.cjs" }
+      "import": {
+        "types": "./dist/turso.d.ts",
+        "default": "./dist/turso.js"
+      },
+      "require": {
+        "types": "./dist/turso.d.cts",
+        "default": "./dist/turso.cjs"
+      }
     }
   },
   "typesVersions": {
     "*": {
-      "mysql": ["./dist/mysql.d.ts"],
-      "postgres": ["./dist/postgres.d.ts"],
-      "tidb": ["./dist/tidb.d.ts"],
-      "d1": ["./dist/d1.d.ts"],
-      "turso": ["./dist/turso.d.ts"]
+      "mysql": [
+        "./dist/mysql.d.ts"
+      ],
+      "postgres": [
+        "./dist/postgres.d.ts"
+      ],
+      "tidb": [
+        "./dist/tidb.d.ts"
+      ],
+      "d1": [
+        "./dist/d1.d.ts"
+      ],
+      "turso": [
+        "./dist/turso.d.ts"
+      ]
     }
   },
   "scripts": {
@@ -72,10 +139,18 @@
     "@libsql/client": ">=0.14.0"
   },
   "peerDependenciesMeta": {
-    "mysql2": { "optional": true },
-    "pg": { "optional": true },
-    "@tidbcloud/serverless": { "optional": true },
-    "@libsql/client": { "optional": true }
+    "mysql2": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "@tidbcloud/serverless": {
+      "optional": true
+    },
+    "@libsql/client": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
