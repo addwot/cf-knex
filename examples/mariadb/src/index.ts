@@ -8,7 +8,7 @@ type Env = {
 export default {
   // MariaDB speaks the MySQL wire protocol, so it uses the same `mysql2`
   // adapter and the same `cf-knex/mysql` entry point. Note what is NOT here:
-  // the `mariadb` npm package. cf-knex deliberately never loads it — knex's
+  // the `mariadb` npm package. cf-knex deliberately never loads it — Knex.js's
   // own `browser` field cannot exclude `mariadb/callback`, and that single
   // unresolvable import is what makes stock Knex.js unbuildable for a Worker.
   async fetch(req: Request, env: Env): Promise<Response> {

@@ -5,7 +5,7 @@
 //
 // It points at dist/, not src/, deliberately: dist/*.d.ts is what a consumer
 // actually installs, and checking against src/ would both miss a broken
-// `exports` map and drag this package's own internal dependencies (knex's
+// `exports` map and drag this package's own internal dependencies (Knex.js's
 // undeclared deep paths, pg's missing types) into a check that is supposed to
 // be about the examples. `pnpm build` must therefore run first — the
 // check:examples script does that itself.
