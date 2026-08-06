@@ -1,0 +1,198 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Lint, typecheck, build, and the checks that inspect the built package
+  # (publint, arethetypeswrong) — none of these need a database.
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # Prints the pnpm version actually resolved from `packageManager` in
+      # package.json, so a future drift between the pin and what a runner
+      # picks up is visible in the log rather than silent.
+      - run: pnpm --version
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm check:package
+      - run: pnpm size
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      # gitleaks scans commit history, not just the working tree — a shallow
+      # checkout would only let it see the single most recent commit.
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only required for organization-owned repos, not personal
+          # accounts; harmless if unset. Picks up .gitleaks.toml at the repo
+          # root automatically.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+
+  # Every database this project talks to, brought up as service containers.
+  # Runs the full suite (unit + integration + types — `pnpm test` with no
+  # --project flag covers all three vitest projects) against two declared
+  # peer knex versions.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        knex: ['3.1.0', '3.3.0']
+    services:
+      mysql:
+        image: mysql:8
+        ports: ['3306:3306']
+        env: { MYSQL_ROOT_PASSWORD: root, MYSQL_DATABASE: cf_knex_test }
+        options: >-
+          --health-cmd="mysqladmin ping -proot" --health-interval=5s --health-retries=20
+      mariadb:
+        image: mariadb:11
+        ports: ['3307:3306']
+        env: { MARIADB_ROOT_PASSWORD: root, MARIADB_DATABASE: cf_knex_test }
+        options: >-
+          --health-cmd="healthcheck.sh --connect" --health-interval=5s --health-retries=20
+      postgres:
+        image: postgres:16
+        ports: ['5432:5432']
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: cf_knex_test }
+        options: >-
+          --health-cmd="pg_isready -U postgres" --health-interval=5s --health-retries=20
+      libsql:
+        # Pinned by digest, matching docker-compose.yml's own libsql service
+        # exactly — see that file for why (a floating :latest tag once took
+        # every other service's pull down with it in one `docker compose up`
+        # run). The image ships no curl/wget, so the health check below is a
+        # raw TCP connect via bash's /dev/tcp, not an HTTP probe; confirmed
+        # against the running container that this actually exercises the
+        # right port and that bash is present in the image.
+        image: ghcr.io/tursodatabase/libsql-server@sha256:07d5da358f37f7f327cc33c1cb5278e7892e04225f011a65a76049372a308982
+        ports: ['8080:8080']
+        env: { SQLD_NODE: primary }
+        options: >-
+          --health-cmd="bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'" --health-interval=5s --health-retries=20
+    env:
+      MYSQL_URL: mysql://root:root@127.0.0.1:3306/cf_knex_test
+      MARIADB_URL: mysql://root:root@127.0.0.1:3307/cf_knex_test
+      POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/cf_knex_test
+      LIBSQL_URL: http://127.0.0.1:8080
+      CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE_MYSQL: mysql://root:root@127.0.0.1:3306/cf_knex_test
+      CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE_PG: postgres://postgres:postgres@127.0.0.1:5432/cf_knex_test
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --version
+      # Mutates the installed knex version in place, on top of the frozen
+      # install above, to exercise the declared `peerDependencies` range.
+      # Deliberate: this job's install is reproducible up to this line and
+      # not after it, unlike `static`'s.
+      - run: pnpm add -D knex@${{ matrix.knex }}
+      - run: pnpm test -- --reporter=default --reporter=json --outputFile=vitest-report.json
+      # Every database above is genuinely up in this job, so none of their
+      # conformance suites should ever take the "URL not set" skip path. A
+      # green `pnpm test` alone can't tell "ran and passed" apart from
+      # "silently skipped" — see the script for why.
+      - name: assert the docker-backed suites actually ran
+        run: .github/scripts/assert-required-suites-ran.sh vitest-report.json MYSQL_URL MARIADB_URL POSTGRES_URL LIBSQL_URL
+
+  # The cloud-only tier: TiDB Serverless and (once a suite exists — see the
+  # comment below) Turso. No service containers here; these are real hosted
+  # services reached with repository secrets, which forked PRs never get, so
+  # this job is skipped there rather than failing on empty credentials.
+  live:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      TIDB_URL: ${{ secrets.TIDB_URL }}
+      TURSO_URL: ${{ secrets.TURSO_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # The TiDB Serverless conformance suite lives under test/integration/
+      # (gated on TIDB_URL, same test.skip placeholder pattern as the
+      # docker-backed suites) and so runs under the `node` vitest project —
+      # there is no separate test/live directory.
+      - run: pnpm test:integration -- --reporter=default --reporter=json --outputFile=vitest-report.json
+      # TURSO_URL/TURSO_AUTH_TOKEN are already wired into env above so a live
+      # Turso suite starts running here the moment one exists, but no test
+      # file reads them yet — only TIDB_URL is asserted below. Adding
+      # TURSO_URL to this list before that suite exists would fail this job
+      # unconditionally.
+      - name: assert the live TiDB suite actually ran
+        run: .github/scripts/assert-required-suites-ran.sh vitest-report.json TIDB_URL
+
+  # Publishes only if every job above actually succeeded — not skipped, not
+  # cancelled, not failed. `needs:` alone would already block this job if a
+  # dependency fails, but a job that was *skipped* (e.g. `live` on a fork
+  # PR — which never applies on the `push` trigger this job requires, but
+  # the check stays regardless) must never be mistaken for one that passed,
+  # so every result is checked explicitly rather than relying on the
+  # implicit behaviour.
+  release:
+    needs: [static, gitleaks, test, live]
+    if: >-
+      github.repository == 'addwot/cf-knex' &&
+      github.ref == 'refs/heads/master' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.static.result == 'success' &&
+      needs.gitleaks.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs.live.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: changesets/action@v1
+        with:
+          publish: pnpm changeset publish
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # changesets/action writes its own .npmrc from this variable name
+          # specifically (verified against its README) — actions/setup-node's
+          # `registry-url` input is deliberately not used in this job, since
+          # it would write a project-level .npmrc of its own first and the
+          # action does not overwrite an .npmrc it finds already present.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'

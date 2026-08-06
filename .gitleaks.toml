@@ -1,0 +1,18 @@
+title = "cf-knex gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "cf-knex-db-url-credential"
+description = "Connection string with an inline username:password against a non-local host (mysql/postgres/libsql) — the realistic leak shape here is a TIDB_URL, TURSO_URL, MYSQL_URL, MARIADB_URL, POSTGRES_URL or LIBSQL_URL pasted with real credentials, e.g. into a commit message or a checked-in fixture"
+regex = '''(?i)\b(?:mysql|postgres(?:ql)?|libsql):\/\/[A-Za-z0-9_.+-]+:[^\s"'@]{4,}@[A-Za-z0-9.-]+'''
+keywords = ["mysql://", "postgres://", "postgresql://", "libsql://"]
+
+  # docker-compose.yml/.env.example's own local dev placeholders
+  # (root:root@127.0.0.1, postgres:postgres@127.0.0.1, …) are not secrets —
+  # RE2 (gitleaks' regex engine) has no lookahead, so excluding them is a
+  # rule-level allowlist instead of a negative lookahead in the regex above.
+  [rules.allowlist]
+  regexTarget = "match"
+  regexes = ['''@127\.0\.0\.1''', '''@localhost''']
