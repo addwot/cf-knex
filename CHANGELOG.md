@@ -38,9 +38,10 @@ First release.
   `knex/lib/knex-builder/make-knex.js` rather than knex's main entry.
 - `disableEval: true` is forced on every mysql2 connection. Workers forbid
   dynamic code generation, and without it every row-returning query fails.
-- Migrations and seeds do not run inside a Worker — knex's `Migrator` reads
-  migration files off a filesystem, which Workers do not have. Run them from
-  your own tooling against the database instead.
+- Migrations do not run inside a Worker. knex's `browser` field replaces its
+  `Migrator` and `Seeder` with no-ops, which a Workers bundler honours, and
+  knex's default migration source reads files off a filesystem Workers do not
+  have. Run migrations from your own tooling against the database instead.
 - Every published entry point is checked on each push by packing the real
   tarball, installing it into a throwaway project, and running a genuine
   `wrangler deploy --dry-run` against it.

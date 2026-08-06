@@ -17,7 +17,7 @@
 // `pnpm build`, gating publish rather than every push.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +42,52 @@ const ENTRIES = [
   { name: 'cf-knex/postgres', specifier: 'cf-knex/postgres', opts: `{ url: 'postgres://u:p@h/d' }` },
   { name: 'cf-knex/tidb', specifier: 'cf-knex/tidb', opts: `{ url: 'https://x' }` },
 ]
+
+// knex's `package.json` `browser` field maps `./lib/migrations/migrate/
+// Migrator.js` and `./lib/migrations/seed/Seeder.js` to `./lib/util/noop.js`.
+// Whether a given bundler honours that is not a detail — it decides whether
+// `db.migrate` works or throws in a deployed Worker, and this repo's two test
+// pools cannot answer it: @cloudflare/vitest-pool-workers ignores the browser
+// field and loads the real classes, so every in-repo test sees the opposite of
+// what ships. This check reads the answer off the bundle wrangler actually
+// emits.
+//
+// Verified against the emitted output: make-knex is bundled (its `migrate: {`
+// and `seed: {` property definitions appear verbatim, so nothing was
+// tree-shaken), `lib/util/noop.js` is bundled as a CommonJS module, and
+// `class Migrator` — the exact declaration at knex's
+// lib/migrations/migrate/Migrator.js — is absent along with the `FsMigrations`
+// and `migrationListResolver` internals only the real class pulls in.
+//
+// The absence markers are what's asserted rather than the noop's presence:
+// `noop` is too common a token to be evidence of anything. If a future
+// wrangler stops honouring the field, the real class reappears here and this
+// fails loudly, instead of the README quietly starting to lie.
+const MIGRATOR_INTERNALS = ['class Migrator', 'FsMigrations', 'migrationListResolver']
+
+function checkMigratorIsStubbed(outdir, entryName) {
+  const entry = `${entryName} (Migrator stubbed out by knex's browser field)`
+  let bundle
+  try {
+    bundle = readdirSync(outdir)
+      .filter((f) => f.endsWith('.js'))
+      .map((f) => readFileSync(join(outdir, f), 'utf8'))
+      .join('\n')
+  } catch (err) {
+    return { entry, ok: false, output: `could not read the emitted bundle in ${outdir}: ${err.message}` }
+  }
+  const found = MIGRATOR_INTERNALS.filter((marker) => bundle.includes(marker))
+  if (found.length === 0) return { entry, ok: true }
+  return {
+    entry,
+    ok: false,
+    output:
+      `knex's real Migrator was bundled into the Worker — found ${found.map((f) => JSON.stringify(f)).join(', ')}.\n` +
+      `wrangler appears to no longer honour knex's browser field. That is good news, but it means the README's\n` +
+      `"migrations do not run inside a Worker" section and the migrate/seed guard in src/core/client.ts are now\n` +
+      `describing behaviour that no longer happens, and both need revisiting.`,
+  }
+}
 
 const work = mkdtempSync(join(tmpdir(), 'cf-knex-bundle-check-'))
 const results = []
@@ -131,7 +177,9 @@ try {
       results.push({ entry: entry.name, ok: true })
     } catch (err) {
       results.push({ entry: entry.name, ok: false, output: (err.stdout ?? '') + (err.stderr ?? '') })
+      continue
     }
+    results.push(checkMigratorIsStubbed(outdir, entry.name))
   }
 } finally {
   rmSync(work, { recursive: true, force: true })
@@ -153,4 +201,5 @@ if (failed) {
   process.exit(1)
 }
 console.log('\nEvery entry point loads from the packed tarball under both `import` and `require`,')
-console.log('and bundles cleanly under a real `wrangler deploy --dry-run`.')
+console.log('bundles cleanly under a real `wrangler deploy --dry-run`, and ships without knex\'s')
+console.log('real Migrator — still replaced by the browser-field no-op, as the docs describe.')
