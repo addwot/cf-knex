@@ -426,6 +426,7 @@ try {
 | `UNSUPPORTED_CAPABILITY` | The driver cannot do this; the message names the alternative |
 | `UNSUPPORTED_TRANSACTION_MODE` | An isolation level or read-only mode this driver cannot honour |
 | `COMMIT_SILENTLY_ROLLED_BACK` | A `COMMIT` was executed as a `ROLLBACK` |
+| `TRANSACTION_ESCAPED` | A statement ran outside its transaction, where `ROLLBACK` cannot undo it (TiDB Cloud Serverless HTTP) |
 | `MALFORMED_DRIVER_RESULT` | The driver returned a shape cf-knex could not read |
 | `INCOMPATIBLE_KNEX` | The installed knex does not expose what cf-knex needs |
 
