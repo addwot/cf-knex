@@ -179,6 +179,59 @@ function runLibsqlTransactionTests(name: string, adapterOptions: LibsqlAdapterOp
   })
 }
 
+// Round-trips a `Date` and a `boolean` through a real insert and asserts the
+// *type* read back, not merely a truthy value -- a conversion that silently
+// produced the wrong shape (e.g. an ISO string, or a boolean surviving as
+// `true` instead of `1`) would still pass a weaker check. Kept out of
+// test/support/conformance.ts deliberately: that suite also runs against
+// mysql and pg, where a `Date` binding is accepted natively and the correct
+// stored/read-back type is a `Date` object, not a number -- a case that only
+// makes sense for sqlite doesn't belong in a suite shared with dialects
+// where it would assert the wrong thing.
+//
+// Unlike the equivalent D1 test (test/unit/d1.test.ts), this one is NOT
+// mutation-sensitive to `CfKnexClient.prepBindings` (src/core/client.ts):
+// confirmed live, against both the docker container and Turso, that
+// `@libsql/client`'s own value encoding (node_modules/@libsql/hrana-client's
+// `valueToProto`) already converts a `Date` to `+value.valueOf()` and a
+// `boolean` to an integer independently of anything this project does --
+// this test would still pass with `prepBindings` reverted to a no-op. It's
+// kept anyway as the real end-to-end confirmation the "verification
+// required" section of this fix asked for: that a Date/boolean insert
+// through this adapter genuinely works and reads back the right type, not
+// merely that `prepBindings` produces the right array in isolation (the
+// unit tests in test/unit/client.test.ts already cover that, and are what
+// actually catches a regression in this code path). What this test *would*
+// still catch: a regression in the adapter's own plumbing that stopped a
+// Date/boolean value from reaching `@libsql/client` at all (e.g. a bad
+// `toRawResult`/`execute()` change), just not a regression in `prepBindings`
+// specifically.
+function runLibsqlBindingNormalizationTests(name: string, adapterOptions: LibsqlAdapterOptions) {
+  describe(`libsql Date/boolean binding normalization: ${name}`, () => {
+    test('a Date and a boolean bound through a real insert round-trip as an epoch-ms number and 0/1', async () => {
+      const db = createKnexClient(createLibsqlAdapter(adapterOptions))
+      const table = `cf_knex_libsql_bindings_${Math.random().toString(36).slice(2, 10)}`
+      const when = new Date(1577934245000)
+      try {
+        await db.schema.createTable(table, (t) => {
+          t.increments('id')
+          t.specificType('created_at', 'blob')
+          t.specificType('flag', 'blob')
+        })
+        await db(table).insert({ created_at: when, flag: true })
+        const row = (await db(table).first()) as { created_at: unknown; flag: unknown }
+        expect(typeof row.created_at).toBe('number')
+        expect(row.created_at).toBe(when.valueOf())
+        expect(typeof row.flag).toBe('number')
+        expect(row.flag).toBe(1)
+      } finally {
+        await db.schema.dropTableIfExists(table)
+        await db.destroy()
+      }
+    })
+  })
+}
+
 if (process.env.LIBSQL_URL) {
   const url = process.env.LIBSQL_URL
   runConformanceSuite('libsql (Turso / libsql-server, HTTP)', () => createKnexClient(createLibsqlAdapter({ url })), {
@@ -187,6 +240,7 @@ if (process.env.LIBSQL_URL) {
     singleWriter: true,
   })
   runLibsqlTransactionTests('libsql-server, docker', { url })
+  runLibsqlBindingNormalizationTests('libsql-server, docker', { url })
 
   // `intMode` (see src/adapters/libsql.ts's doc comment above
   // LibsqlAdapterOptions) is private on the underlying HttpClient, so it
@@ -227,6 +281,7 @@ if (process.env.LIBSQL_URL) {
 } else {
   skip('libsql (Turso / libsql-server, HTTP)', 'LIBSQL_URL')
   skip('libsql real transactions (libsql-server, docker)', 'LIBSQL_URL')
+  skip('libsql Date/boolean binding normalization (libsql-server, docker)', 'LIBSQL_URL')
   skip('libsql intMode read-back', 'LIBSQL_URL')
 }
 
@@ -244,7 +299,9 @@ if (process.env.TURSO_URL && process.env.TURSO_AUTH_TOKEN) {
     singleWriter: true,
   })
   runLibsqlTransactionTests('Turso, live', { url, authToken })
+  runLibsqlBindingNormalizationTests('Turso, live', { url, authToken })
 } else {
   skip('libsql (Turso, live)', 'TURSO_URL / TURSO_AUTH_TOKEN')
   skip('libsql real transactions (Turso, live)', 'TURSO_URL / TURSO_AUTH_TOKEN')
+  skip('libsql Date/boolean binding normalization (Turso, live)', 'TURSO_URL / TURSO_AUTH_TOKEN')
 }

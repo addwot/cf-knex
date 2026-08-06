@@ -614,3 +614,82 @@ test("an explicit caller pool option overrides the Workers-appropriate default (
   expect(pool.max).toBe(3)
   await db.destroy()
 })
+
+test('sqlite: a Date binding reaches execute() as its epoch-ms number, and a boolean as 0/1 (query builder path)', async () => {
+  // Matches knex's own better-sqlite3 dialect (node_modules/knex/lib/dialects/
+  // better-sqlite3/index.js's `_formatBindings`) exactly, so a knex +
+  // better-sqlite3 codebase gets the same stored values migrating to any
+  // sqlite-family adapter here.
+  const { adapter, calls } = createFakeAdapter({ dialect: 'sqlite' })
+  const db = createKnexClient(adapter)
+  const when = new Date(1577934245000)
+  await db('users').insert({ created_at: when, active: true, inactive: false })
+  // knex's insert compiler sorts object keys alphabetically when generating
+  // the column list -- `active`, `created_at`, `inactive`, in that order.
+  expect(calls[0]?.bindings).toEqual([1, when.valueOf(), 0])
+  await db.destroy()
+})
+
+test('sqlite: db.raw() bindings are normalized the same way as the query builder (the fix must not miss db.raw())', async () => {
+  // `prepBindings` is knex's own hook, called from lib/raw.js as well as the
+  // query compiler -- `_query()` (src/core/client.ts) is this project's own
+  // method and is only ever reached through the query-builder/runner path,
+  // so hooking that instead would silently miss this case.
+  const { adapter, calls } = createFakeAdapter({ dialect: 'sqlite' })
+  const db = createKnexClient(adapter)
+  const when = new Date(1577934245000)
+  await db.raw('select ?, ? as v', [when, true])
+  expect(calls[0]?.bindings).toEqual([when.valueOf(), 1])
+  await db.destroy()
+})
+
+test('mysql/postgres: a Date and a boolean binding reach execute() unchanged -- the sqlite conversion must not leak into other dialects', async () => {
+  // The isolation half of the fix: converting a Date to a number for mysql
+  // or postgres would corrupt every timestamp column, since both drivers
+  // accept Date/boolean natively and encode them correctly for their own
+  // column types.
+  for (const dialect of ['mysql', 'postgres'] as const) {
+    const { adapter, calls } = createFakeAdapter({
+      dialect,
+      // postgres's response guard (src/core/response.ts) requires a
+      // `command` field on every result -- unrelated to what this test
+      // actually checks (the bindings array), but needed for the insert to
+      // resolve instead of throwing a malformed-result error.
+      result: dialect === 'postgres' ? { command: 'INSERT' } : {},
+    })
+    const db = createKnexClient(adapter)
+    const when = new Date(1577934245000)
+    await db('users').insert({ created_at: when, active: true })
+    // Alphabetical column order again -- `active`, `created_at`.
+    expect(calls[0]?.bindings).toEqual([true, when])
+    expect(calls[0]?.bindings?.[1]).toBeInstanceOf(Date)
+    await db.destroy()
+  }
+})
+
+test('sqlite: a bigint binding passes through unconverted (matches better-sqlite3, which does not convert it either)', async () => {
+  // Measured: D1's real binding throws D1_TYPE_ERROR on a bigint the same
+  // way it used to on Date (test/unit/d1.test.ts pins this against the real
+  // binding), but knex's own better-sqlite3 dialect -- the reference this
+  // project's sqlite-path conversion matches -- doesn't convert bigint
+  // either, so this deliberately isn't widened beyond that reference.
+  const { adapter, calls } = createFakeAdapter({ dialect: 'sqlite' })
+  const db = createKnexClient(adapter)
+  await db.raw('select ? as v', [42n])
+  expect(calls[0]?.bindings).toEqual([42n])
+  await db.destroy()
+})
+
+test('sqlite: Uint8Array/ArrayBuffer bindings pass through unconverted (accepted correctly by every sqlite-family backend today)', async () => {
+  // Measured live against D1 (miniflare), the docker libsql-server, and live
+  // Turso: all three accept a Uint8Array or ArrayBuffer binding as-is and
+  // round-trip its bytes correctly, matching better-sqlite3's own
+  // `_formatBindings`, which also leaves both untouched. Nothing to fix.
+  const { adapter, calls } = createFakeAdapter({ dialect: 'sqlite' })
+  const db = createKnexClient(adapter)
+  const bytes = new Uint8Array([1, 2, 3])
+  const buffer = new ArrayBuffer(4)
+  await db.raw('select ?, ? as v', [bytes, buffer])
+  expect(calls[0]?.bindings).toEqual([bytes, buffer])
+  await db.destroy()
+})

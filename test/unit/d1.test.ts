@@ -149,16 +149,57 @@ test('a real query through this adapter never marks env.DB itself -- __knexUid /
   expect(after).not.toContain('__knex__disposed')
 })
 
-test('the real binding throws D1_TYPE_ERROR on a Date binding rather than silently converting it', () => {
-  // Pins the "Known limitation: Date bindings are rejected, not converted"
-  // section of src/adapters/d1.ts's doc comment as a real assertion instead
-  // of only prose -- fails loudly if D1 ever starts accepting Date, at
-  // which point that documentation would otherwise go silently stale.
-  // bind() itself throws synchronously here (confirmed by the stack trace
-  // this test produced before this fix: `D1PreparedStatement.bind`, not
-  // `.all()`), so this is a plain throwing-function assertion, not an
-  // async rejection one.
+test('the real binding throws D1_TYPE_ERROR on a raw Date binding -- the reason CfKnexClient.prepBindings must convert it first', () => {
+  // Pins the fact src/adapters/d1.ts's doc comment now explains: the real
+  // binding still throws on an unconverted Date exactly as before -- what
+  // changed is that `../core/client.ts`'s `CfKnexClient.prepBindings` never
+  // lets one reach here anymore (see the round-trip test below). This test
+  // fails loudly if D1 ever starts accepting Date directly, at which point
+  // that documentation would otherwise go silently stale. bind() itself
+  // throws synchronously here (confirmed by the stack trace: `D1PreparedStatement
+  // .bind`, not `.all()`), so this is a plain throwing-function assertion,
+  // not an async rejection one.
   expect(() => env.DB.prepare('SELECT ?1 as d').bind(new Date())).toThrow(/D1_TYPE_ERROR/)
+})
+
+test('the real binding also throws D1_TYPE_ERROR on a bigint binding -- a known, currently unfixed limitation', () => {
+  // Unlike Date/boolean, a bigint binding gets no conversion from
+  // CfKnexClient.prepBindings (src/core/client.ts) -- knex's own
+  // better-sqlite3 dialect, the reference this project's sqlite-path
+  // conversion matches, doesn't convert bigint either, so this project
+  // deliberately doesn't invent a conversion beyond that reference. D1 still
+  // rejects a bigint binding the same way it used to reject Date; this test
+  // pins that as a documented, real, measured gap (src/adapters/d1.ts's doc
+  // comment), not an oversight.
+  expect(() => env.DB.prepare('SELECT ?1 as v').bind(42n)).toThrow(/D1_TYPE_ERROR/)
+})
+
+test('a Date and a boolean bound through a real insert round-trip as an epoch-ms number and 0/1, not as a thrown error', async () => {
+  // The actual regression guard for the fix: before CfKnexClient.prepBindings
+  // existed, this exact insert threw D1_TYPE_ERROR (see the raw-binding test
+  // above for why) instead of ever reaching a SELECT. Asserting the *type*
+  // of what comes back, not just that a row exists, is what catches a
+  // conversion that silently produces the wrong shape (e.g. an ISO string)
+  // instead of matching knex's own better-sqlite3 semantics.
+  const db = createKnexClient(createD1Adapter({ binding: env.DB }))
+  const table = `d1_bindings_roundtrip_${Date.now()}`
+  const when = new Date(1577934245000)
+  try {
+    await db.schema.createTable(table, (t) => {
+      t.increments('id')
+      t.specificType('created_at', 'blob')
+      t.specificType('flag', 'blob')
+    })
+    await db(table).insert({ created_at: when, flag: true })
+    const row = (await db(table).first()) as { created_at: unknown; flag: unknown }
+    expect(typeof row.created_at).toBe('number')
+    expect(row.created_at).toBe(when.valueOf())
+    expect(typeof row.flag).toBe('number')
+    expect(row.flag).toBe(1)
+  } finally {
+    await db.schema.dropTableIfExists(table)
+    await db.destroy()
+  }
 })
 
 test('release() resolves without throwing (a no-op is "closing" a handle with nothing to close)', async () => {

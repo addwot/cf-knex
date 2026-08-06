@@ -160,14 +160,15 @@ const DEFAULT_LOG = {
 
 // `loadDialect` deliberately types the base dialect class's instance as
 // `unknown` — this file otherwise never calls an inherited member by name,
-// so there is nothing to type-check against. `destroy()` below is the one
-// exception: it calls `super.destroy()` to reuse knex's own pool-teardown
-// sequence, so the instance type is refined with just that one member typed
-// (an intersection keeps every other inherited member available as
-// `unknown`, same as before).
+// so there is nothing to type-check against. `destroy()`, `transaction()`
+// and `prepBindings()` below are the exceptions: each calls the matching
+// `super.*()` to reuse knex's own base behavior, so the instance type is
+// refined with just those three members typed (an intersection keeps every
+// other inherited member available as `unknown`, same as before).
 type KnexClientInstance = Record<string, unknown> & {
   destroy(callback?: (err?: unknown) => void): Promise<void>
   transaction(container: unknown, config?: unknown, outerTx?: unknown): unknown
+  prepBindings(bindings: unknown[]): unknown[]
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- mirrors knex's own public `Knex<TRecord, TResult>` signature (node_modules/knex/types/index.d.ts); widening it would diverge from knex's generics and break `.select()`/`.selec()` type-checking.
@@ -231,6 +232,37 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
     // them).
     validateConnection(handle: unknown): boolean {
       return adapter.validate ? adapter.validate(handle) : true
+    }
+
+    // knex's own hook (node_modules/knex/lib/client.js's base `Client`), not
+    // this project's `_query()` below — every query-issuing path routes
+    // bindings through it first: the query builder (lib/query/querycompiler.js),
+    // `db.raw(...)` (lib/raw.js), and the execution runner (lib/execution/
+    // internal/query-executioner.js) all call `client.prepBindings(...)`
+    // before `_query()` ever sees the result. Hooking `_query()` instead
+    // would miss `db.raw()` entirely, since raw queries reach `prepBindings`
+    // through a separate call site that never goes through `_query()`'s
+    // caller.
+    //
+    // sqlite-only, and only `Date`/boolean: the base `Client.prepBindings`
+    // is a plain passthrough, and knex's own sqlite3 dialect never overrides
+    // it — only `Client_BetterSQLite3._formatBindings` (node_modules/knex/lib/
+    // dialects/better-sqlite3/index.js) converts these two types, the same
+    // way below. Matching that conversion instead of inventing a different
+    // one is what lets a knex + better-sqlite3 codebase migrate to any
+    // sqlite-family adapter here (D1, libsql, Turso) without its stored
+    // values changing shape. mysql2 and pg accept `Date`/boolean natively
+    // and encode them correctly for their own column types — converting a
+    // `Date` to a number there would corrupt every timestamp column — so
+    // every other dialect falls straight through to the base passthrough.
+    prepBindings(bindings: unknown[]): unknown[] {
+      if (adapter.dialect !== 'sqlite') return super.prepBindings(bindings)
+      if (!bindings) return []
+      return bindings.map((binding) => {
+        if (binding instanceof Date) return binding.valueOf()
+        if (typeof binding === 'boolean') return Number(binding)
+        return binding
+      })
     }
 
     async _query(handle: unknown, obj: Record<string, unknown>) {

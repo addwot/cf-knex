@@ -88,28 +88,27 @@ export type D1AdapterOptions = { binding: D1DatabaseLike }
  * method a caller can reach directly off the binding regardless of what this
  * adapter declares — the hint just names it.
  *
- * ## Known limitation: `Date` bindings are rejected, not converted
- * A `Date` value anywhere in a query's bindings reaches this adapter's
- * `execute()` unchanged and D1 rejects it: `.bind(new Date())` against the
- * real binding throws `D1_TYPE_ERROR: Type 'object' not supported for value
- * '...'` (confirmed against the real binding and pinned by a regression test
- * in `test/unit/d1.test.ts`; a plain boolean, by contrast, binds and
- * executes fine through the same call, coming back as SQLite's `1`/`0`, not
- * as a boolean). Checked directly why
- * nothing upstream converts it first: `node_modules/knex/lib/client.js`'s
- * `Client.prepBindings(bindings) { return bindings }` is a plain passthrough,
- * and `node_modules/knex/lib/dialects/sqlite3/index.js`'s `Client_SQLite3`
- * does not override it (no `prepBindings` in that file) — so a `Date` a
- * caller passes to e.g. `.insert({ createdAt: new Date() })` arrives at this
- * adapter's `execute()` exactly as given, with nothing in between to convert
- * it. Deliberately not normalized here (e.g. to an ISO string or a Unix
- * timestamp): this adapter has no way to know which serialization a given
- * caller's schema actually expects, and guessing one silently would commit
- * every caller to this file's choice instead of their own. Callers need to
- * convert `Date` values themselves (e.g. `.toISOString()`, or a Unix
- * timestamp integer) before a query reaches this adapter.
- * `test/support/conformance.ts` never inserts a `Date`, so this is invisible
- * to the shared suite.
+ * ## `Date`/boolean bindings: normalized before they ever reach this file
+ * `.bind(new Date())` against the real binding throws `D1_TYPE_ERROR: Type
+ * 'object' not supported for value '...'` — confirmed directly against
+ * `env.DB` and still pinned by a regression test in `test/unit/d1.test.ts`.
+ * This adapter's own `execute()` never sees that failure, though: `../core/
+ * client.ts`'s `CfKnexClient.prepBindings` converts every `Date` to
+ * `.valueOf()` (an epoch-ms number) and every `boolean` to `0`/`1` before
+ * bindings reach *any* sqlite-family adapter's `execute()`, matching how
+ * knex's own `better-sqlite3` dialect (`node_modules/knex/lib/dialects/
+ * better-sqlite3/index.js`'s `_formatBindings`) treats the same two types —
+ * the base `Client.prepBindings` (`node_modules/knex/lib/client.js`) is a
+ * plain passthrough, and knex's own sqlite3 dialect never overrides it, so
+ * without that conversion a `Date` a caller passed to e.g. `.insert({
+ * createdAt: new Date() })` would have reached this file's `execute()`
+ * exactly as given, with nothing in between to convert it. A `bigint`
+ * binding gets no such conversion — `better-sqlite3` doesn't convert it
+ * either — so it still reaches this adapter unchanged and D1 still rejects
+ * it the same way (`D1_TYPE_ERROR: Type 'bigint' not supported`), a real,
+ * measured, currently-unfixed limitation distinct from the `Date` case.
+ * `test/support/conformance.ts` never inserts a `Date` or a `bigint`, so
+ * neither is visible to the shared suite.
  *
  * ## Routing every `acquire()` call through one underlying binding
  * `acquire()` below returns a fresh wrapper object every call (see its own
