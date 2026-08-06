@@ -342,6 +342,12 @@ building at runtime (`db.schema.createTable(…)`) works fine on every backend.
 libsql's `lastInsertRowid` all exceed 2^53, so cf-knex does not narrow them to `number`
 and lose precision. Wrap it — `Number(id)` — rather than assuming either type.
 
+**On TiDB Cloud Serverless, `COUNT` comes back as a string.** Its HTTP driver encodes
+aggregate results as decimal strings, so `(await db('t').count('* as count').first()).count`
+is `'2'`, where the same query over the MySQL wire protocol gives `2`. It bites on
+arithmetic and on `===`: `count > 10` compares strings, and `count === 0` is never true.
+Wrap it — `Number(row.count)` — which is correct on every backend.
+
 **Large integer *columns* need `intMode` on Turso/libsql.** The libsql driver defaults to
 `intMode: 'number'`, and decoding a column value above `Number.MAX_SAFE_INTEGER` under
 that mode throws a bare `RangeError` from the driver, not a `CfKnexError`. cf-knex keeps
