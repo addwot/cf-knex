@@ -9,6 +9,9 @@ dist/
 coverage/
 *.log
 .DS_Store
+# Written by `.github/scripts/assert-required-suites-ran.sh`'s vitest
+# invocation in CI; harmless but not meant to be committed if run locally.
+vitest-report.json
 .superpowers/
 
 # Superpowers working docs (specs/plans/notes) — local only, never published
