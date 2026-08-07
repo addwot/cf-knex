@@ -33,7 +33,7 @@ variables win, so CI's secrets are never shadowed.
 
 Any suite whose credential is unset registers a named `test.skip` placeholder rather than
 failing, so `pnpm test` is green without the hosted tiers. CI asserts the hosted suites
-actually ran. Locally, check the file count: 26/26 means the backends were reached, 20/26
+actually ran. Locally, check the file count: 29/29 means the backends were reached, 23/29
 means six suites skipped wholesale. Never `source .env` — a value contains an unquoted `&`
 that the shell reads as a job separator and drops; `node --env-file=.env` parses it.
 

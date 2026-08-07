@@ -127,11 +127,54 @@ export function resolveFetch(opts: TidbHttpAdapterOptions): typeof fetch {
 }
 
 // Per-handle transaction bookkeeping: the open `Tx` once `BEGIN` has run,
-// and an isolation level a preceding `SET TRANSACTION` asked for but that
-// hasn't reached a `begin()` call yet. A `WeakMap` keyed by handle scopes
-// this to each `Connection` `acquire()` hands out — never shared, so no
-// cross-handle bleed — and lets an evicted handle's entry be collected.
-type TxState = { tx?: TidbTx; session?: string | null; pendingIsolation?: Isolation }
+// an isolation level a preceding `SET TRANSACTION` asked for but that hasn't
+// reached a `begin()` call yet, and the tail of this transaction's statement
+// queue (see `enqueue`). A `WeakMap` keyed by handle scopes this to each
+// `Connection` `acquire()` hands out — never shared, so no cross-handle bleed
+// — and lets an evicted handle's entry be collected.
+type TxState = { tx?: TidbTx; session?: string | null; pendingIsolation?: Isolation; tail?: Promise<void> }
+
+// Runs `job` only once every job already queued on this transaction has
+// settled, giving the transaction a concurrency of exactly one.
+//
+// A TiDB transaction is one server-side session, and a session runs one
+// statement at a time. The driver's README says so outright ("The transaction
+// is not concurrent-safe. You are not allowed to run SQLs parallel in the same
+// transaction"), and tidbcloud/serverless-js#61 is the report that got it
+// written down — parallel statements there surfaced as `Rollback transaction
+// fail: invalid connection`. The maintainers closed it as won't-fix, with the
+// advice to run transactions serially; this is that advice, applied once here
+// rather than demanded of every caller.
+//
+// knex will not do it for us: it chains *sibling* transactions through
+// `_lastChild` (knex/lib/execution/transaction.js), but nothing stops a caller
+// awaiting several builders on one open transaction at once, which is ordinary
+// enough code that it works on every other backend this library supports:
+//
+//   await Promise.all([trx('a').insert(…), trx('b').insert(…)])
+//
+// The queue is per handle, not global — a shared one would serialise a whole
+// client's pool behind whichever transaction happened to be slowest. Statements
+// outside a transaction are never queued: each is an independent HTTP request
+// against its own session, so there is nothing to corrupt, and their
+// concurrency is already bounded by the pool.
+//
+// Chaining happens synchronously, before this function's caller reaches its
+// first `await`, so statements take their turn in the order they were issued
+// rather than in whatever order their promises happened to be constructed.
+function enqueue<T>(state: TxState, job: () => Promise<T>): Promise<T> {
+  const run = (state.tail ?? Promise.resolve()).then(job)
+  // The tail deliberately discards both the value and the rejection. A
+  // statement that fails is the caller's problem, not the queue's: leaving the
+  // tail rejected would fail every statement queued behind it — starting with
+  // the ROLLBACK that a failed statement is the very thing prompting. Swallowing
+  // here also keeps this internal copy from being reported as an unhandled
+  // rejection, since it is `run`, returned below, that the caller attaches to.
+  state.tail = run.then(NOOP, NOOP)
+  return run
+}
+
+function NOOP(): void {}
 
 // Throws if `tx` is no longer on the session it was opened with, meaning the
 // statement just executed did not run inside the transaction. `expected` is
@@ -221,46 +264,58 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
 
       if (state?.tx) {
         const { tx } = state
-        if (COMMIT_STATEMENT.test(sql) || ROLLBACK_STATEMENT.test(sql)) {
-          try {
-            const ended = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
-            // A COMMIT that escaped is the worst case of all: it reports
-            // success while the writes it was meant to make durable were
-            // already applied (or lost) outside its control.
-            assertSameSession(state.session, tx, sql)
-            return ended
-          } finally {
-            // Ends the transaction on this handle regardless of outcome — a
-            // failed COMMIT still ends it, and leaving `state.tx` behind
-            // would let the next statement on this handle silently keep
-            // running "inside" a transaction the caller believes is closed.
-            txStates.delete(conn)
+        // Queued, not run: everything below shares one server-side session,
+        // which admits one statement at a time (see `enqueue`). The whole
+        // branch goes in as a single unit rather than just the `tx.execute()`
+        // call, because the session check and the bookkeeping that follows a
+        // statement have to stay welded to it. `assertSameSession` reads the
+        // token the *response* left on `tx.conn`, so with a sibling free to
+        // land in between, it would report on whichever statement resolved
+        // last — able to miss a real escape and to invent one for a statement
+        // that never escaped. Serialising is what makes the detector sound,
+        // not merely what keeps the session intact.
+        return enqueue(state, async () => {
+          if (COMMIT_STATEMENT.test(sql) || ROLLBACK_STATEMENT.test(sql)) {
+            try {
+              const ended = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
+              // A COMMIT that escaped is the worst case of all: it reports
+              // success while the writes it was meant to make durable were
+              // already applied (or lost) outside its control.
+              assertSameSession(state.session, tx, sql)
+              return ended
+            } finally {
+              // Ends the transaction on this handle regardless of outcome — a
+              // failed COMMIT still ends it, and leaving `state.tx` behind
+              // would let the next statement on this handle silently keep
+              // running "inside" a transaction the caller believes is closed.
+              txStates.delete(conn)
+            }
           }
-        }
-        // Savepoint SQL and anything else issued while a transaction is
-        // open: forward unchanged to the `Tx`, never to `conn`. Verified
-        // live against a real TiDB Cloud Serverless cluster: SAVEPOINT,
-        // ROLLBACK TO SAVEPOINT, RELEASE SAVEPOINT, and COMMIT all pass
-        // through `tx.execute()` unmodified.
-        const result = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
-        try {
-          // Checked after every in-transaction statement, not just writes: by
-          // the time one has escaped, a SELECT is reading outside the
-          // transaction's snapshot too, and the caller has no other signal
-          // that it happened.
-          assertSameSession(state.session, tx, sql)
-        } catch (err) {
-          // The transaction this handle believed it held no longer exists on
-          // the server. Forgetting it is not bookkeeping tidiness: without
-          // this, every later statement on this handle — including the
-          // caller's own cleanup, and `release()`'s rollback — is still
-          // routed into that dead `Tx`. On a `pool: { max: 1 }` client, where
-          // cleanup necessarily reuses this same handle, that turns a
-          // detected escape into a hang.
-          txStates.delete(conn)
-          throw err
-        }
-        return result
+          // Savepoint SQL and anything else issued while a transaction is
+          // open: forward unchanged to the `Tx`, never to `conn`. Verified
+          // live against a real TiDB Cloud Serverless cluster: SAVEPOINT,
+          // ROLLBACK TO SAVEPOINT, RELEASE SAVEPOINT, and COMMIT all pass
+          // through `tx.execute()` unmodified.
+          const result = toRawResult(await tx.execute(sql, bindings, { fullResult: true }))
+          try {
+            // Checked after every in-transaction statement, not just writes: by
+            // the time one has escaped, a SELECT is reading outside the
+            // transaction's snapshot too, and the caller has no other signal
+            // that it happened.
+            assertSameSession(state.session, tx, sql)
+          } catch (err) {
+            // The transaction this handle believed it held no longer exists on
+            // the server. Forgetting it is not bookkeeping tidiness: without
+            // this, every later statement on this handle — including the
+            // caller's own cleanup, and `release()`'s rollback — is still
+            // routed into that dead `Tx`. On a `pool: { max: 1 }` client, where
+            // cleanup necessarily reuses this same handle, that turns a
+            // detected escape into a hang.
+            txStates.delete(conn)
+            throw err
+          }
+          return result
+        })
       }
 
       if (BEGIN_STATEMENT.test(sql)) {
