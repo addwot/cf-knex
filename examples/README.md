@@ -87,6 +87,29 @@ protocol and nothing else, so they are an ordinary MySQL backend: put Hyperdrive
 and import `cf-knex/mysql`. `cf-knex/tidb` means specifically "TiDB Cloud Serverless over
 HTTP".
 
+**Nothing bounds a request unless you ask.** `@tidbcloud/serverless` calls `fetch` with no
+signal, no timeout and no retry, so a request that never comes back never comes back — the
+Worker waits until the platform kills it. We watched a statement that normally takes ~1 s
+hang past 30 s against an otherwise healthy cluster, while every other statement in the
+same run kept its usual timing. Set `timeoutMs` and you get a `CfKnexError` you can catch:
+
+```ts
+const db = createClient({ url: env.TIDB_URL, timeoutMs: 10_000 })
+```
+
+Opt-in rather than defaulted, because the bound is not free. The abort is local, so a
+statement that times out **may still be applied** server-side — treat the error as unknown
+outcome, not as "did not happen", and pick a budget above the slowest query you expect.
+This is the only driver with the option: the other four ride transports that already time
+out on their own.
+
+For anything more specific — retries, tracing, a per-statement budget — pass your own
+`fetch`. `timeoutMs` composes on top of it rather than around the global:
+
+```ts
+const db = createClient({ url: env.TIDB_URL, fetch: (input, init) => tracedFetch(input, init) })
+```
+
 ### D1
 
 ```ts
@@ -168,6 +191,8 @@ type ClientConfig = {
   driver?: 'mysql2' | 'tidb-http' | 'pg' | 'd1' | 'libsql'
   url?: string
   authToken?: string          // libsql/Turso
+  timeoutMs?: number          // tidb-http — per-request budget, no default
+  fetch?: typeof fetch        // tidb-http — replaces the fetch given to the driver
   connection?: Credentials
   hyperdrive?: Hyperdrive     // the binding, passed straight through
   binding?: D1Database
@@ -397,6 +422,7 @@ try {
 | `UNSUPPORTED_TRANSACTION_MODE` | An isolation level or read-only mode this driver cannot honour |
 | `COMMIT_SILENTLY_ROLLED_BACK` | A `COMMIT` was executed as a `ROLLBACK` |
 | `TRANSACTION_ESCAPED` | A statement ran outside its transaction, where `ROLLBACK` cannot undo it (TiDB Cloud Serverless HTTP) |
+| `REQUEST_TIMEOUT` | A request exceeded the `timeoutMs` you set and was aborted; the server may still apply it (TiDB Cloud Serverless HTTP) |
 | `MALFORMED_DRIVER_RESULT` | The driver returned a shape cf-knex could not read |
 | `INCOMPATIBLE_KNEX` | The installed Knex.js does not expose what cf-knex needs |
 

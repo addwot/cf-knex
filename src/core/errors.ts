@@ -10,6 +10,7 @@ export type CfKnexErrorCode =
   | 'COMMIT_SILENTLY_ROLLED_BACK'
   | 'UNSUPPORTED_TRANSACTION_MODE'
   | 'TRANSACTION_ESCAPED'
+  | 'REQUEST_TIMEOUT'
 
 export class CfKnexError extends Error {
   readonly code: CfKnexErrorCode
@@ -49,6 +50,19 @@ export class CfKnexError extends Error {
     return new CfKnexError(
       'TRANSACTION_ESCAPED',
       `a statement escaped its transaction and was applied outside it — ROLLBACK will NOT undo it. ${detail}`,
+    )
+  }
+
+  // Raised only when the caller asked for a bound and it expired — never for
+  // a request that failed on its own. The statement's fate is genuinely
+  // unknown at this point: the abort stops this client waiting, it does not
+  // reach the server, so a write may still be applied after this throws.
+  // Neither the URL nor the SQL reaches the message; the budget is the one
+  // thing here that is the caller's own value.
+  static requestTimedOut(driver: string, ms: number): CfKnexError {
+    return new CfKnexError(
+      'REQUEST_TIMEOUT',
+      `the ${driver} request exceeded the ${ms}ms timeoutMs budget and was aborted. The server may still apply it, so treat a write as of unknown outcome rather than as failed.`,
     )
   }
 

@@ -275,6 +275,39 @@ if (process.env.TIDB_URL) {
       await db.destroy()
     }
   })
+
+  // `timeoutMs` is covered against stub fetches in test/unit/tidb-timeout.test.ts,
+  // which is where its edge cases belong. These two exist for the one thing a
+  // stub cannot show: that wrapping `fetch` still composes with the real
+  // driver over real HTTP — gzip, the `TiDB-Session` round trip, and a
+  // `Response` the driver actually parses.
+  test('a generous timeoutMs leaves an ordinary query untouched', async () => {
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: 20_000 }))
+    try {
+      // knex's mysql dialect hands back `[rows, fields]`, and TiDB sends the
+      // literal as the string '1' — both measured, not assumed.
+      const [rows] = (await db.raw('SELECT 1 AS one')) as [Array<{ one: unknown }>, unknown[]]
+      expect(rows[0]?.one).toBe('1')
+    } finally {
+      await db.destroy()
+    }
+  })
+
+  test('a timeoutMs shorter than any real round trip aborts with REQUEST_TIMEOUT', async () => {
+    // 1ms cannot be beaten by a TLS round trip to a hosted cluster, so this is
+    // deterministic without depending on the cluster being slow. It is the
+    // live proof of the failure mode that reached CI as an opaque 30s hang:
+    // the request is now bounded, and says which budget it exceeded.
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: 1 }))
+    try {
+      await expect(db.raw('SELECT 1')).rejects.toMatchObject({
+        name: 'CfKnexError',
+        code: 'REQUEST_TIMEOUT',
+      })
+    } finally {
+      await db.destroy()
+    }
+  })
 } else {
   skip('tidb-http (TiDB Cloud Serverless)', 'TIDB_URL')
 }

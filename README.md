@@ -12,7 +12,7 @@ Turso) connector for Workers, connected directly or through Hyperdrive, featurin
 - transactions on every backend but D1
 - row streaming on MySQL and Postgres
 - Hyperdrive and D1 bindings passed straight through, or found for you by `fromEnv`
-- one entry point per backend, 3.3–3.9 kB brotli, so a Worker bundles a single adapter
+- one entry point per backend, 3.3–4.3 kB brotli, so a Worker bundles a single adapter
 - typed errors where a backend cannot do what was asked, never a generic driver crash
 - a conformance suite run against every backend, hosted tiers included
 
@@ -87,6 +87,10 @@ calls it for you. What *does* need finishing is a transaction: use
 `db.transaction(async trx => { … })`, which commits for you, or
 `await using trx = await db.transaction()`, which rolls back unless you call `commit()`
 yourself.
+
+On TiDB Cloud Serverless, consider adding `timeoutMs`. Its HTTP driver sets no timeout of
+its own, so a request that stalls hangs the Worker until the platform kills it — see
+[TiDB Cloud Serverless over HTTP](examples/README.md#tidb-cloud-serverless-over-http).
 
 Every other backend is the same Worker with a different import and a different connection
 field — a binding for D1, `hyperdrive` for anything behind Hyperdrive, `url` plus

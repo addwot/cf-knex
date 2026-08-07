@@ -87,6 +87,17 @@ export type ClientConfig = {
   driver?: DriverName
   url?: string
   authToken?: string
+  /**
+   * Per-request timeout, in milliseconds. `tidb-http` only, the same way
+   * `authToken` above is `libsql` only — carried here so the root entry can
+   * configure everything `cf-knex/tidb` can, rather than the subpath quietly
+   * being the more capable of the two. Ignored by every other driver, whose
+   * transports bound themselves. See `TidbHttpAdapterOptions` in
+   * ../adapters/tidb-http.ts for what it does and why there is no default.
+   */
+  timeoutMs?: number
+  /** Replaces the `fetch` handed to the driver. `tidb-http` only, as above. */
+  fetch?: typeof fetch
   connection?: Credentials
   hyperdrive?: { host: string; port: number; user: string; password: string; database: string; connectionString: string }
   binding?: unknown

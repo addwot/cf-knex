@@ -48,7 +48,83 @@ function sessionOf(tx: TidbTx): string | null | undefined {
   return tx.conn?.session
 }
 
-export type TidbHttpAdapterOptions = { url: string }
+export type TidbHttpAdapterOptions = {
+  url: string
+  /**
+   * Aborts any single HTTP request that has not completed within this many
+   * milliseconds, raising `CfKnexError` with code `REQUEST_TIMEOUT`.
+   *
+   * There is no default, and omitting this leaves every request unbounded —
+   * which is what the driver does on its own. `postQuery` in
+   * node_modules/@tidbcloud/serverless/dist/index.js calls `fetch` with no
+   * `signal`, no timeout and no retry, so nothing below this option can stop
+   * a request that never comes back. Observed: a statement that normally
+   * takes ~1s hung past 30s against a healthy cluster while every other
+   * statement in the same run kept its usual timing.
+   *
+   * A bound is not a free win, which is why it is opt-in: the abort is local,
+   * so a statement that times out may still be applied server-side. Choose a
+   * budget above the slowest query you actually expect, and treat the error
+   * as "unknown outcome", not "did not happen".
+   */
+  timeoutMs?: number
+  /**
+   * Replaces the `fetch` handed to the driver — for retries, tracing, or a
+   * bound more specific than `timeoutMs`. `timeoutMs` composes on top of it
+   * rather than around the global, so the two work together.
+   */
+  fetch?: typeof fetch
+}
+
+/**
+ * The `fetch` the driver is given: the caller's, the global, and `timeoutMs`
+ * layered over whichever of those applies.
+ *
+ * Built once per adapter rather than per `acquire()`, and returned unwrapped
+ * when no budget is set, so a client that does not ask for a timeout pays
+ * nothing and the driver sees the exact function it would have seen before.
+ *
+ * Exported for tests, not part of the package's public API — the same reason
+ * `resolveConfig` is exported from ./pg.ts. Two of the four behaviours below
+ * (a caller-supplied `signal`, and a `fetch` that ignores the one it is
+ * given) cannot be reached through `createTidbHttpAdapter` while the driver
+ * sends no signal of its own, and asserting them directly beats shipping them
+ * untested.
+ */
+export function resolveFetch(opts: TidbHttpAdapterOptions): typeof fetch {
+  const base = opts.fetch ?? fetch
+  const ms = opts.timeoutMs
+  if (ms === undefined) return base
+  return async (input, init) => {
+    const budget = AbortSignal.timeout(ms)
+    // `AbortSignal.any` rather than overwriting: 0.3.0's `postQuery` passes no
+    // `signal`, but this adapter's peer range admits versions that might, and
+    // dropping a caller's own cancellation would be silent. Both signals are
+    // live, so whichever fires first wins.
+    const signal = init?.signal ? AbortSignal.any([init.signal, budget]) : budget
+    // Raced as well as passed, because passing it alone only bounds a `fetch`
+    // that honors signals. The global does; a caller's wrapper is not obliged
+    // to, and a `timeoutMs` that silently did nothing there would be the exact
+    // unbounded wait this option exists to remove. The signal still goes
+    // through so a well-behaved `fetch` is genuinely cancelled rather than
+    // merely abandoned — the race is the floor, not the mechanism.
+    const expired = new Promise<never>((_, reject) => {
+      budget.addEventListener('abort', () => reject(CfKnexError.requestTimedOut('tidb-http', ms)), { once: true })
+    })
+    try {
+      return await Promise.race([base(input, { ...init, signal }), expired])
+    } catch (err) {
+      // Asks the signal we created rather than matching on the rejection's
+      // name or message: what an aborted `fetch` rejects with differs between
+      // workerd and Node, and this collapses both orderings — the race winning
+      // and the base rejecting on abort first — onto one error. A caller's own
+      // `init.signal` aborting leaves `budget.aborted` false, so their
+      // cancellation still surfaces as itself.
+      if (budget.aborted) throw CfKnexError.requestTimedOut('tidb-http', ms)
+      throw err
+    }
+  }
+}
 
 // Per-handle transaction bookkeeping: the open `Tx` once `BEGIN` has run,
 // and an isolation level a preceding `SET TRANSACTION` asked for but that
@@ -102,6 +178,7 @@ function describeStatement(sql: string): string {
 // silently run each one on its own throwaway session.
 export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapter {
   const txStates = new WeakMap<TidbConnection, TxState>()
+  const request = resolveFetch(opts)
 
   return {
     dialect: 'mysql',
@@ -122,7 +199,7 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
       // session state — or open transaction — that instance's
       // `this.session` currently holds. `connect()` is a pure constructor
       // with no I/O (dist/index.js), so this costs nothing extra.
-      return serverless.connect({ url: opts.url, fetch }) as unknown as TidbConnection
+      return serverless.connect({ url: opts.url, fetch: request }) as unknown as TidbConnection
     },
 
     // A caller who issues `db.raw('BEGIN')` and never commits, or abandons
