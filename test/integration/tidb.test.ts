@@ -605,8 +605,137 @@ if (process.env.TIDB_URL) {
   skip('tidb-http (TiDB Cloud Serverless)', 'TIDB_URL')
 }
 
-// Needs a *second* Serverless cluster, under different credentials. The suite
-// above pins that stateless connections share one session per credential; this
+// The suite above pins that a *user-defined variable* crosses between clients.
+// Every probe it uses is named randomly, and that namespacing is exactly what
+// makes those tests safe to run on a session shared by every cf-knex client for
+// one credential: two tests can leak past each other without colliding.
+//
+// The settings below have no namespace. `time_zone`, `sql_mode` and the current
+// schema are one value per session, so writing one does not merely become
+// visible elsewhere — it *replaces* what every other client on that credential
+// is already using, including clients that never issued a SET and whose authors
+// never considered the possibility. That is a different and worse failure than
+// a readable variable, and it earns tests rather than a README sentence.
+//
+// It runs against TIDB_URL_2 because it cannot safely run anywhere else. Two
+// test files gate on TIDB_URL (this one and destroy-bounded.test.ts) and vitest
+// runs files in parallel, so mutating an un-namespaced setting on that
+// credential would corrupt an unrelated suite through the very mechanism under
+// test — the failure would be real, but it would be this suite's fault rather
+// than the library's. Nothing else reads TIDB_URL_2, and tests within one file
+// run sequentially, so this suite has that session to itself.
+//
+// Each test restores the original value in a `finally`, so a failure here
+// cannot cascade into the cross-credential suite below.
+//
+// CI cover comes for free: the placeholder below names TIDB_URL_2, and
+// .github/scripts/assert-required-suites-ran.sh detects a skipped suite by
+// matching `(<VAR> ` in the placeholder rather than by suite name, so a second
+// suite gated on the same variable needs no second entry in its map.
+if (process.env.TIDB_URL_2) {
+  const url = process.env.TIDB_URL_2
+
+  describe('tidb-http (shared session settings)', () => {
+    // Two clients means two pools, two adapters and two `Connection` objects —
+    // the strongest separation a caller can build without a second credential,
+    // and still not enough to get a session of their own.
+    async function withTwoClients(fn: (setter: KnexType, reader: KnexType) => Promise<void>) {
+      const setter = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
+      const reader = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
+      try {
+        await fn(setter, reader)
+      } finally {
+        await setter.destroy()
+        await reader.destroy()
+      }
+    }
+
+    // Each probe selects a single unnamed expression, so reading the column by
+    // position keeps the SQL as short as what a caller would actually type.
+    async function scalar(db: KnexType, sql: string, bindings: unknown[] = []): Promise<unknown> {
+      const [rows] = (await db.raw(sql, bindings)) as [Array<Record<string, unknown>>, unknown[]]
+      const row = rows[0]
+      return row === undefined ? null : Object.values(row)[0]
+    }
+
+    test('a time_zone set on one client changes how a separate client reads a datetime literal', async () => {
+      await withTwoClients(async (setter, reader) => {
+        const original = String(await scalar(setter, 'SELECT @@session.time_zone'))
+        try {
+          // Both readings are taken on `reader`, which never issues a SET, and
+          // both use the same fixed literal — so the zone `setter` installed is
+          // the only thing that differs between them. A literal rather than
+          // NOW() keeps the assertion off the wall clock.
+          await setter.raw('SET time_zone = ?', ['+00:00'])
+          const atUtc = Number(await scalar(reader, "SELECT UNIX_TIMESTAMP('2026-01-01 00:00:00')"))
+
+          await setter.raw('SET time_zone = ?', ['+09:00'])
+          const atTokyo = Number(await scalar(reader, "SELECT UNIX_TIMESTAMP('2026-01-01 00:00:00')"))
+
+          // Exact, not merely different: the same instant is now nine hours
+          // earlier to `reader`, which is what a mis-stamped row would look
+          // like to whoever finds it later.
+          expect(atUtc - atTokyo).toBe(9 * 60 * 60)
+        } finally {
+          await setter.raw('SET time_zone = ?', [original])
+        }
+      })
+    })
+
+    test('a sql_mode set on one client changes how a separate client parses SQL', async () => {
+      await withTwoClients(async (setter, reader) => {
+        const original = String(await scalar(setter, 'SELECT @@session.sql_mode'))
+        try {
+          // Control, and the reason the assertion below carries weight: under
+          // the default mode `||` is logical OR, and two non-numeric strings
+          // make it 0. Reading that first proves the default is in force, so
+          // the change afterwards has one available cause.
+          expect(String(await scalar(reader, "SELECT 'a' || 'b'"))).toBe('0')
+
+          await setter.raw('SET sql_mode = ?', ['PIPES_AS_CONCAT'])
+
+          // Same statement, same client, different language. A leaked variable
+          // is a value another query might read; a leaked sql_mode rewrites the
+          // grammar every other query on the credential is parsed with.
+          expect(await scalar(reader, "SELECT 'a' || 'b'")).toBe('ab')
+        } finally {
+          await setter.raw('SET sql_mode = ?', [original])
+        }
+      })
+    })
+
+    test('a USE on one client redirects where a separate client resolves unqualified table names', async () => {
+      await withTwoClients(async (setter, reader) => {
+        const original = String(await scalar(setter, 'SELECT DATABASE()'))
+        try {
+          // Control. Without it, "the name resolved after the USE" is evidence
+          // of nothing — the name has to be unresolvable first.
+          expect(await scalar(reader, 'SELECT DATABASE()')).toBe(original)
+          await expect(reader.raw('SELECT COUNT(*) FROM TABLES')).rejects.toThrow()
+
+          await setter.raw('USE information_schema')
+
+          // `reader` asked for nothing and changed nothing, yet its unqualified
+          // names now resolve against a schema it never selected. This is the
+          // worst of the three: a query that silently reads or writes the wrong
+          // table looks like a correct query returning wrong data.
+          expect(await scalar(reader, 'SELECT DATABASE()')).toBe('information_schema')
+          expect(Number(await scalar(reader, 'SELECT COUNT(*) FROM TABLES'))).toBeGreaterThan(0)
+        } finally {
+          // `USE` takes an identifier, so this is the one restore that cannot
+          // be a binding. The value is what the server itself just reported as
+          // the current schema.
+          await setter.raw(`USE \`${original}\``)
+        }
+      })
+    })
+  })
+} else {
+  skip('tidb-http (shared session settings)', 'TIDB_URL_2')
+}
+
+// Needs a *second* Serverless cluster, under different credentials. The suites
+// above pin that stateless connections share one session per credential; this
 // pins the boundary that keeps that from being a tenant problem rather than a
 // scoping quirk.
 //
