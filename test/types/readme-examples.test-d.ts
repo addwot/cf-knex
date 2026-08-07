@@ -101,3 +101,46 @@ test('README: typed rows', () => {
 test('README: pool override through the knex option', () => {
   void (() => createD1Client({ binding: d1Binding, knex: { pool: { min: 0, max: 2 } } }))
 })
+
+// The Lifetime section's teardown shapes. `await using` is the part worth
+// pinning at the type level: it only compiles if the shipped types really carry
+// `Symbol.asyncDispose`, and the failure mode without it is a compile error in
+// the reader's project, not in ours.
+test('guide: await using tears the client down at scope exit', () => {
+  void (async () => {
+    await using db = createTidbClient({ url: 'https://example.tidbcloud.com' })
+    return db('posts').select('*')
+  })
+})
+
+test('guide: await using rolls an unfinished transactor back', () => {
+  void (async () => {
+    const db = createTursoClient({ url: 'libsql://example.turso.io', authToken: 't' })
+    await using trx = await db.transaction()
+    await trx('posts').insert({ title: 'hello' })
+    await trx.commit()
+  })
+})
+
+test('guide: db.destroy() is still there, and takes destroyTimeoutMs', () => {
+  void (async () => {
+    const db = createPgClient({ url: 'postgres://u:p@h/d', knex: { destroyTimeoutMs: 2_000 } })
+    await db.destroy()
+  })
+})
+
+// One identity, not five. The disposer type lives in a chunk every entry point
+// imports, so a client from one entry must stay assignable to a client from
+// another -- which is exactly what a `unique symbol` fallback would have broken
+// across the .d.ts/.d.cts split.
+test('guide: the client type is the same type across entry points', () => {
+  void (() => {
+    const clients = [
+      createD1Client({ binding: d1Binding }),
+      createTursoClient({ url: 'libsql://example.turso.io', authToken: 't' }),
+      createMysqlClient({ hyperdrive }),
+      createClient({ engine: 'sqlite', binding: d1Binding }),
+    ]
+    return clients
+  })
+})

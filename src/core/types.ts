@@ -39,9 +39,15 @@ export type CapabilityHints = Partial<Record<keyof AdapterCapabilities, string>>
  *   reuse"; at this layer tarn calls it only when evicting a resource for
  *   good. An adapter that treats it as a no-op leaks one connection per
  *   acquire.
- * - `destroy()` tears down adapter-level state outliving any single handle.
- *   Called after the pool has released what it holds, and possibly more than
- *   once, so implementations must tolerate repeat calls.
+ * - `destroy()` tears down adapter-level state outliving any single handle,
+ *   **and is the adapter's own backstop for handles the pool never released.**
+ *   Normally it runs after the pool's release pass has finished. It is not
+ *   guaranteed to: `Client.destroy()` (./client.ts) bounds how long it waits
+ *   for that pass, and on a pool that overruns its budget — a connection still
+ *   checked out by an abandoned transaction — `destroy()` starts while the pass
+ *   is still draining. So an implementation must tolerate a later `release()`
+ *   for a handle it already closed, must not assume its own bookkeeping is
+ *   empty, and must tolerate repeat calls.
  *
  * `validate(handle)` is optional: it tells a live pooled handle from one that
  * died while idle (killed server-side, network drop), which would otherwise

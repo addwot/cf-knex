@@ -1,3 +1,4 @@
+import type { Knex as KnexType } from 'knex'
 import { env } from 'cloudflare:test'
 import { expect, test } from 'vitest'
 import { createD1Adapter } from '../../src/adapters/d1'
@@ -70,10 +71,10 @@ const inMemoryMigrationSource = {
   getMigrationName: (migration: { name: string }) => migration.name,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- knex's own MigrationSource.getMigration(migration) shape; this fixture ignores which one was asked for, there's only ever the one
   getMigration: async (migration: { name: string }) => ({
-    up: async (knex: ReturnType<typeof createKnexClient>) => {
+    up: async (knex: KnexType) => {
       await knex.schema.createTable('widgets', (t) => t.increments('id'))
     },
-    down: async (knex: ReturnType<typeof createKnexClient>) => {
+    down: async (knex: KnexType) => {
       await knex.schema.dropTable('widgets')
     },
   }),
@@ -147,7 +148,7 @@ test('db.seed.run() with a filesystem-free seedSource succeeds against a real D1
     getSeeds: async () => [{ name: '001_seed_widgets.js' }],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- knex's own SeedSource.getSeed(seed) shape; this fixture ignores which one was asked for, there's only ever the one
     getSeed: async (seed: { name: string }) => ({
-      seed: async (knex: ReturnType<typeof createKnexClient>) => {
+      seed: async (knex: KnexType) => {
         await knex('seeded_widgets').insert({})
       },
     }),

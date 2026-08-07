@@ -1,6 +1,19 @@
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { defineConfig } from 'vitest/config'
 
+// The `node` project reads `process.env` and nothing else fills it — the
+// "Using secrets defined in .env" line is miniflare's and covers `workers`
+// alone, so without this every integration suite silently falls back to its
+// `test.skip` placeholder. Not a `--env-file` flag on the npm scripts: this
+// also covers watch mode and IDE runners, and needs nothing newer than
+// `engines.node` (">=22"), which `--env-file-if-exists` (22.9) would.
+// Already-set variables win, so CI's secrets are never shadowed.
+try {
+  process.loadEnvFile('.env')
+} catch {
+  // No `.env` — normal in CI and a fresh clone.
+}
+
 // Three projects. `workers`/`node` split because @cloudflare/vitest-pool-workers
 // cannot import `mysql2` or `pg` at all — both are CJS packages with dual
 // ESM/CJS exports maps and bare Node-builtin requires the pool's module

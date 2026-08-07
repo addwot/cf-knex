@@ -55,7 +55,6 @@ import { createClient } from 'cf-knex/d1'
 
 const db = createClient({ binding: env.DB })
 const posts = await db('posts').orderBy('id', 'desc').limit(10)
-await db.destroy()
 ```
 
 See [`src/index.ts`](src/index.ts) for the complete Worker.

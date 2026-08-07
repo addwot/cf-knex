@@ -7,10 +7,11 @@ import { createKnexClient } from './core/client'
 import { CfKnexError } from './core/errors'
 import { inferDriver, isD1Binding } from './core/infer'
 import type { ClientConfig, DriverAdapter, DriverName } from './core/types'
-import type { Knex } from 'knex'
+import type { DisposableKnex } from './core/disposable'
 
 export { CfKnexError } from './core/errors'
 export type { CfKnexErrorCode } from './core/errors'
+export type { DisposableKnex, DisposableTransaction } from './core/disposable'
 export type { ClientConfig, Credentials, DriverAdapter, DriverName, Engine, RawResult } from './core/types'
 
 // `inferDriver` only confirms that `config` names exactly one connection
@@ -59,7 +60,7 @@ function buildAdapter(config: ClientConfig, driver: DriverName): DriverAdapter {
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- mirrors knex's own public `Knex<TRecord, TResult>` signature (src/core/client.ts follows the same pattern).
 export function createClient<TRecord extends {} = any, TResult = unknown[]>(
   config: ClientConfig,
-): Knex<TRecord, TResult> {
+): DisposableKnex<TRecord, TResult> {
   const driver = inferDriver(config)
   return createKnexClient<TRecord, TResult>(buildAdapter(config, driver), config.knex)
 }
@@ -82,7 +83,7 @@ function isHyperdriveBinding(value: unknown): value is { connectionString: strin
  * and builds a client from it — the zero-config path for a Worker with a
  * single database binding.
  */
-export function fromEnv(env: Record<string, unknown>, opts: { prefer?: DriverName } = {}): Knex {
+export function fromEnv(env: Record<string, unknown>, opts: { prefer?: DriverName } = {}): DisposableKnex {
   const found: ClientConfig[] = []
   for (const value of Object.values(env)) {
     if (isD1Binding(value)) {

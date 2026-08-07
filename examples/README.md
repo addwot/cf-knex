@@ -278,17 +278,92 @@ shape, normalised only where Knex.js itself requires it.
 
 ## Lifetime
 
-Create the client inside the request handler and destroy it at the end. Do not cache one
-in a module-level global: workerd rejects reusing I/O objects across requests with
-`Cannot perform I/O on behalf of a different request`. It costs less than it sounds —
-Hyperdrive pools server-side, and D1, Turso and TiDB over HTTP have no connection to
-re-establish.
+Create the client inside the request handler. Do not cache one in a module-level global:
+workerd rejects reusing I/O objects across requests with `Cannot perform I/O on behalf of
+a different request`. It costs less than it sounds — Hyperdrive pools server-side, and D1,
+Turso and TiDB over HTTP have no connection to re-establish.
 
-cf-knex cannot call `destroy()` for you: it never sees your `Response`, and closing after
-each query would break transactions. `ctx.waitUntil(db.destroy())` works if you would
-rather not `await` it. It ends real sockets on `mysql2`, `pg` and `libsql` and is an empty
-function on D1 and TiDB over HTTP — the examples call it everywhere so that switching
-backends never turns a no-op into a leak.
+### What actually needs cleaning up
+
+Forgetting `db.destroy()` after ordinary queries leaks nothing on any backend. That is
+measured, not assumed — against a live TiDB Cloud Serverless cluster, a live Turso
+database, a deployed Neon instance, and local MySQL and Postgres, counting server-side
+sessions rather than trusting the driver's own flags:
+
+| Backend | After queries, no `destroy()` | After an **abandoned transaction** |
+|---|---|---|
+| 🟠 D1 | nothing to close | no transactions to abandon |
+| ⚡ TiDB over HTTP | nothing to close — no session is held between calls | **locks held for minutes**, until TiDB expires them |
+| 🪶 Turso | nothing to close — connecting does no I/O until the first query | **all writers blocked ~10–15 s** (one writer at a time) |
+| 🐬 MySQL / MariaDB | measured: zero connections left behind | the server rolls back on disconnect |
+| 🐘 Postgres / Neon | measured: zero connections left behind | the server rolls back on disconnect |
+
+So the thing worth caring about is not the client, it is an **unfinished transaction**.
+The callback form finishes on every path, including a throw:
+
+```ts
+await db.transaction(async trx => {
+  await trx('users').insert({ email })
+})
+```
+
+The bare transactor form does not, and that is what strands a lock:
+
+```ts
+const trx = await db.transaction()
+await trx('users').insert({ email })
+// an early return or a throw here never commits and never rolls back
+```
+
+Prefer `await using`, which rolls back at scope exit if you did not finish it:
+
+```ts
+await using trx = await db.transaction()
+await trx('users').insert({ email })
+await trx.commit()
+```
+
+**The two forms disagree about what happens when you do nothing.** The callback form
+*commits* for you when the body returns normally. `await using` *rolls back* unless you
+call `commit()` yourself — that `await trx.commit()` above is required, not decoration.
+Dropping it is silent: no error, no warning, and the insert simply is not there. Rolling
+back is the right default for a disposer, and it is what every other language does with
+this pattern, but it is the opposite of the callback form. Read a refactor between the two
+carefully.
+
+`await using` needs TypeScript 5.2+ with `lib` at `esnext.disposable` or later, and a
+runtime that supports it (workerd does). Without it, use the callback form.
+
+### `db.destroy()`
+
+Still supported, still the explicit way to tear a client down, and safe to call more than
+once — repeat calls await the first rather than tearing the adapter down again. cf-knex
+cannot call it for you: it never sees your `Response`, and closing after each query would
+break transactions. `await using db = createClient(…)` calls it for you at scope exit.
+
+`db.destroy()` is bounded. If a connection is still checked out — which in practice means
+a transaction nobody finished — it waits `destroyTimeoutMs`, warns saying exactly that,
+and returns. It does **not** force the connection closed, and it does not pretend to: the
+transaction is already stranded at that point, and on TiDB and Turso the locks stay held
+server-side until the backend expires them. Nothing inside a Worker can shorten that. Not
+stranding it in the first place is the fix, which is what the disposer above is for.
+
+`destroyTimeoutMs` (6000 by default, settable per client) is the budget for `destroy()`
+as a whole, not per internal step. Teardown waits on the connection pool and then on the
+adapter, and the adapter gets whatever the pool left, so `destroy()` costs you at most
+that figure end to end.
+
+**One caveat worth knowing before you rely on the warning.** It is emitted by `destroy()`,
+and this guide has just told you that you do not need to call `destroy()` after ordinary
+queries. Both are true, and together they leave a gap: strand a transaction in a handler
+that never calls `destroy()`, and nothing says so — not in the logs, not in the response.
+There is no hook in a Worker that would let cf-knex notice at end of request. So treat the
+warning as a backstop for when you *do* tear down, and treat `await using` as the actual
+answer: it makes the mistake impossible rather than merely reported.
+
+`ctx.waitUntil(db.destroy())` works if you would rather not `await` it — but it hides that
+warning behind an already-returned response, so prefer `await` while you are still
+establishing that your transactions are balanced.
 
 The pool defaults to `{ min: 0, max: 5 }` rather than Knex.js's `{ min: 2, max: 10 }`,
 because a `min` above zero pins connections open for the life of the client. Override it

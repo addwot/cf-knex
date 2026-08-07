@@ -52,7 +52,6 @@ import { createClient } from 'cf-knex/turso'
 
 const db = createClient({ url: env.TURSO_URL, authToken: env.TURSO_AUTH_TOKEN })
 const [id] = await db('posts').insert({ title: 'hello' })
-await db.destroy()
 ```
 
 See [`src/index.ts`](src/index.ts) for the complete Worker.

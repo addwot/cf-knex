@@ -71,7 +71,6 @@ import { createClient } from 'cf-knex/mysql'
 const db = createClient({ url: env.MARIADB_URL })
 // or: createClient({ hyperdrive: env.HYPERDRIVE })
 const [id] = await db('posts').insert({ title: 'hello' })
-await db.destroy()
 ```
 
 See [`src/index.ts`](src/index.ts) for the complete Worker.

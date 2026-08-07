@@ -37,6 +37,13 @@ export function createFakeAdapter(opts: {
   // `stream`'s presence — a test that sets one without the other exercises
   // that gate directly.
   stream?: DriverAdapter['stream']
+  // Makes `destroy()` a promise that never settles, so a test can drive
+  // `Client.destroy()`'s second budget — the one around `adapter.destroy()`
+  // itself (src/core/client.ts). Distinct from a `destroy()` that *rejects*:
+  // a rejection is already a settled outcome, and only a promise that never
+  // settles exercises the timeout. Omitted entirely unless set, like every
+  // other option here.
+  hangOnDestroy?: boolean
 }) {
   const calls: Array<{ sql: string; bindings: unknown[] }> = []
   // `createKnexClient` (src/core/client.ts) wires `acquire`/`release`/
@@ -76,6 +83,7 @@ export function createFakeAdapter(opts: {
     },
     destroy: async () => {
       destroyCount++
+      if (opts.hangOnDestroy) await new Promise<never>(() => {})
     },
   }
   if (opts.invalidateAfterFirstUse) {
