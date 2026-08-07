@@ -197,6 +197,9 @@ jobs:
     if: github.event_name != 'pull_request'
     env:
       TIDB_URL: ${{ secrets.TIDB_URL }}
+      # A second Serverless cluster under different credentials, for the
+      # cross-credential isolation suite only. Nothing else reads it.
+      TIDB_URL_2: ${{ secrets.TIDB_URL_2 }}
       TURSO_URL: ${{ secrets.TURSO_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       NEON_URL: ${{ secrets.NEON_URL }}
@@ -224,7 +227,7 @@ jobs:
       # both TURSO_URL and TURSO_AUTH_TOKEN; naming TURSO_URL is enough to
       # catch either being unset, since the suite is gated on both together.
       - name: assert the live hosted-tier suites actually ran
-        run: .github/scripts/assert-required-suites-ran.sh vitest-report.json TIDB_URL TURSO_URL NEON_URL
+        run: .github/scripts/assert-required-suites-ran.sh vitest-report.json TIDB_URL TIDB_URL_2 TURSO_URL NEON_URL
 
   # Publishes only if every job above actually succeeded — not skipped, not
   # cancelled, not failed. `needs:` alone would already block this job if a

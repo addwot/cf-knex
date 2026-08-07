@@ -280,6 +280,23 @@ Knex.js's plain `BEGIN`/`COMMIT`/`ROLLBACK` would each run on a throwaway sessio
 write would land outside the transaction while looking successful. cf-knex drives the real
 `Tx` object instead, savepoints included.
 
+**Statements inside one TiDB transaction run one at a time.** A transaction is a single
+server-side session, and a session admits one statement at a time — parallel ones return
+`invalid connection` ([serverless-js#61][tidb-61], closed as "run the transaction
+serially"). So cf-knex serialises them for you: `await Promise.all([trx(…).insert(…),
+trx(…).insert(…)])` behaves, it just does not overlap. Statements *outside* a transaction
+stay parallel, bounded by `pool.max`.
+
+**TiDB Serverless session state is shared across every connection, not per client.** Each
+non-transactional connection for one credential is handed the *same* server-side session
+(its `TiDB-Session` token is byte-identical and prefixed `stateless_`). A `SET @var`, a
+`USE`, or any session-scoped `SET` is therefore visible to every other query using those
+credentials — including one issued by a separate `createClient(…)`. Do not use session
+state to carry anything request-scoped. Transactions are exempt: `BEGIN` allocates a
+private `txn_`-prefixed session.
+
+[tidb-61]: https://github.com/tidbcloud/serverless-js/issues/61
+
 **TiDB Serverless over HTTP cannot stream.** The driver awaits `response.json()` in full
 and exposes no cursor, so `.stream()` throws rather than buffering the whole result and
 pretending. Reach the cluster through Hyperdrive with `cf-knex/mysql` if you need it.

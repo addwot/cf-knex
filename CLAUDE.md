@@ -33,7 +33,7 @@ variables win, so CI's secrets are never shadowed.
 
 Any suite whose credential is unset registers a named `test.skip` placeholder rather than
 failing, so `pnpm test` is green without the hosted tiers. CI asserts the hosted suites
-actually ran. Locally, check the file count: 26/26 means the backends were reached, 20/26
+actually ran. Locally, check the file count: 29/29 means the backends were reached, 23/29
 means six suites skipped wholesale. Never `source .env` — a value contains an unquoted `&`
 that the shell reads as a job separator and drops; `node --env-file=.env` parses it.
 
@@ -142,8 +142,12 @@ there is no npm token in the repo and none should be added. The `release` job ch
 dependency's result explicitly, so a *skipped* job can never be mistaken for a passing
 one: it publishes only if `static`, `gitleaks`, `test` and `live` all genuinely succeeded.
 
-The `live` job needs repository secrets (`TIDB_URL`, `TURSO_URL`, `TURSO_AUTH_TOKEN`,
-`NEON_URL`). Set them with `gh secret set`; never paste their values into a transcript.
+The `live` job needs repository secrets (`TIDB_URL`, `TIDB_URL_2`, `TURSO_URL`,
+`TURSO_AUTH_TOKEN`, `NEON_URL`). `TIDB_URL_2` is a *second* TiDB Serverless cluster under
+different credentials, read only by the cross-credential isolation suite — TiDB Cloud
+Serverless shares one server-side session across all stateless connections for a
+credential, and that suite pins that the sharing stops at the credential boundary.
+Set them with `gh secret set`; never paste their values into a transcript.
 It does not run on pull requests at all — only on `master` and manual dispatch — so a
 PR is green without ever touching a hosted tier.
 

@@ -58,6 +58,7 @@ declare -A VAR_TO_SUITE=(
   [POSTGRES_URL]="pg (direct)"
   [LIBSQL_URL]="libsql (Turso / libsql-server, HTTP)"
   [TIDB_URL]="tidb-http (TiDB Cloud Serverless)"
+  [TIDB_URL_2]="tidb-http (cross-credential isolation)"
   [TURSO_URL]="libsql (Turso, live)"
   [NEON_URL]="pg (hosted: Neon, pooler)"
 )
