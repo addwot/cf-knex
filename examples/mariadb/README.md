@@ -1,4 +1,11 @@
-# cf-knex + MariaDB
+# [cf-knex](../../README.md) + MariaDB
+
+> **A Worker querying MariaDB — same code as MySQL, and emphatically not the `mariadb`
+> package.**
+
+- Entry point `cf-knex/mysql` · driver [`mysql2`](https://www.npmjs.com/package/mysql2)
+- Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-mariadb)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 MariaDB speaks the MySQL wire protocol, so it uses the **`mysql2` driver and the
 `cf-knex/mysql` entry point** — same code as [`../mysql`](../mysql).
@@ -7,10 +14,10 @@ MariaDB speaks the MySQL wire protocol, so it uses the **`mysql2` driver and the
 
 This is the one thing worth knowing, and it is the reason cf-knex exists.
 
-knex declares `mariadb` among its dialect drivers. Its `package.json` `browser`
+Knex.js declares `mariadb` among its dialect drivers. Its `package.json` `browser`
 field maps bare driver names to `false` so a bundler can drop them — but a bare key
-does not cover subpaths, and knex imports `mariadb/callback`. That subpath escapes
-the substitution, so a Worker build fails to resolve it and **stock knex cannot be
+does not cover subpaths, and Knex.js imports `mariadb/callback`. That subpath escapes
+the substitution, so a Worker build fails to resolve it and **stock Knex.js cannot be
 bundled for Workers at all**.
 
 cf-knex never routes MariaDB through that dialect. It uses `mysql2`, which MariaDB
@@ -77,7 +84,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Transactions** | Fully supported, including savepoints and isolation levels. |
 | **Streaming** | Supported. |
 | **Inserted ids** | `insert()` resolves to the auto-increment value. |
-| **Migrations** | Run them from a plain Node knex process, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process, never from inside the Worker. |
 
 MariaDB 11 runs the full conformance suite in this project's CI, alongside MySQL 8.
 

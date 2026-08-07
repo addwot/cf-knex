@@ -141,7 +141,7 @@ const MIGRATION_ACCESSORS = [
 // not any one driver (the substitution happens at bundle time, before a
 // driver is chosen, so it hits all five identically).
 const MIGRATION_UNAVAILABLE_HINT =
-  "knex's own package.json 'browser' field maps Migrator/Seeder to a no-op, and real wrangler/esbuild honours that field when bundling for Workers, so this getter cannot construct a real one here. Run migrations/seeds from your own tooling against the database directly instead: `wrangler d1 migrations` for D1, the Turso/libsql CLI, or a plain Node knex process against Postgres/MySQL — never from inside the Worker."
+  "Knex.js's own package.json 'browser' field maps Migrator/Seeder to a no-op, and real wrangler/esbuild honours that field when bundling for Workers, so this getter cannot construct a real one here. Run migrations/seeds from your own tooling against the database directly instead: `wrangler d1 migrations` for D1, the Turso/libsql CLI, or a plain Node Knex.js process against Postgres/MySQL — never from inside the Worker."
 
 /**
  * Redefines `migrate`/`seed` on `target` so a `TypeError` escaping the original getter

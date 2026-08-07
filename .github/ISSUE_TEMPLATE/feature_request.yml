@@ -1,0 +1,51 @@
+name: Feature or backend request
+description: A capability cf-knex does not have, or a database it does not reach
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >-
+        Describe the situation rather than the fix. What does your Worker need to do that
+        it currently cannot?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What are you doing instead today?
+      description: >-
+        A working workaround is useful information — it tells us how much this costs, and
+        sometimes it turns out to be the right answer.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of request is this?
+      options:
+        - a new backend or driver
+        - a capability on an existing backend (streaming, a transaction mode, …)
+        - an API or typing change
+        - something else
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        **If you are asking for a new backend**, the two questions that decide whether it
+        can work are: does it have a driver that runs inside a Worker (`fetch`-based, or
+        TCP via Hyperdrive), and which of `mysql` / `postgres` / `sqlite` does its SQL
+        dialect match? Answer those below if you know them.
+
+        **If you are asking for a capability**, note that cf-knex deliberately raises a
+        typed error rather than silently ignoring what a backend cannot do — so "it throws
+        `UNSUPPORTED_CAPABILITY`" may be the intended behaviour rather than the bug.
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: Anything else
+      description: Links to the driver's docs, its Workers compatibility notes, or prior art.

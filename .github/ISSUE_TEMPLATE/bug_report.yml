@@ -1,0 +1,100 @@
+name: Bug report
+description: Something behaves differently from what the README or guide says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste a connection string, password or auth token.** cf-knex redacts
+        credentials from its own error messages, but a driver error or a stack trace can
+        still carry one. Replace the host and credentials with `***` before posting.
+
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Which driver?
+      description: The `driver` you passed, or the one inferred from your URL or binding.
+      options:
+        - tidb-http (TiDB Cloud Serverless over HTTP)
+        - mysql2 (MySQL / MariaDB / TiDB self-hosted or Dedicated)
+        - pg (Postgres / Neon)
+        - d1 (Cloudflare D1)
+        - libsql (Turso / libsql)
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How do you connect?
+      options:
+        - a URL
+        - a Hyperdrive binding
+        - a D1 binding
+        - explicit credentials (host/user/password)
+        - fromEnv()
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Where does it run?
+      options:
+        - a deployed Worker (wrangler deploy)
+        - wrangler dev --remote
+        - wrangler dev (local)
+        - vitest with @cloudflare/vitest-pool-workers
+        - plain Node
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: cf-knex, knex, wrangler, and the driver package if one is involved.
+      placeholder: cf-knex 0.1.1, knex 3.3.0, wrangler 4.118.0, @tidbcloud/serverless 0.3.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: What did you run?
+      description: >-
+        The smallest query that shows it. Include the `createClient` call with the
+        credentials removed. If a build fails rather than a query, paste the build error.
+      render: ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect, and what happened instead?
+      description: >-
+        If the two disagree about a value's *type* rather than its content, say so
+        explicitly — several backends return aggregates as strings, and the guide's
+        "Things that will surprise you" section may already cover it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: The error, if there was one
+      description: >-
+        If it is a `CfKnexError`, include its `code` — that tells us whether cf-knex
+        raised it or passed a driver error through. Credentials removed, please.
+      render: shell
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before filing
+      options:
+        - label: I checked the guide's "Things that will surprise you" section for this behaviour.
+        - label: I removed every credential from the text above.
+          required: true

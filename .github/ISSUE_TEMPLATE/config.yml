@@ -1,0 +1,16 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Known differences between backends
+    url: https://github.com/addwot/cf-knex/blob/master/examples/README.md#things-that-will-surprise-you
+    about: >-
+      Aggregates as strings, insertId widths, what each driver cannot do, and which
+      Hyperdrive limitations apply. Check here before filing — several of the most
+      surprising behaviours are intended and documented.
+  - name: Report a security vulnerability
+    url: https://github.com/addwot/cf-knex/security/advisories/new
+    about: >-
+      Report privately rather than in a public issue. This package handles connection
+      strings and auth tokens; do not post one in an issue.
+  - name: How to contribute
+    url: https://github.com/addwot/cf-knex/blob/master/CONTRIBUTING.md
+    about: Local setup, what CI checks, and when a changeset is needed.

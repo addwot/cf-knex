@@ -22,7 +22,7 @@ export default {
       return Response.json(posts)
     } finally {
       // Always destroy before the response is returned. A Worker isolate can
-      // be evicted at any point after the request ends, and knex's pool holds
+      // be evicted at any point after the request ends, and Knex.js's pool holds
       // handles that would otherwise be torn down without ceremony.
       await db.destroy()
     }

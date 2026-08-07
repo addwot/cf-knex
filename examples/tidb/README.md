@@ -1,4 +1,10 @@
-# cf-knex + TiDB Cloud Serverless
+# [cf-knex](../../README.md) + TiDB Cloud Serverless
+
+> **A Worker querying TiDB Cloud Serverless over its HTTP API — no TCP, no Hyperdrive.**
+
+- Entry point `cf-knex/tidb` · driver [`@tidbcloud/serverless`](https://www.npmjs.com/package/@tidbcloud/serverless)
+- Transactions ✓ · streaming ✗ — [what differs](#what-differs-on-tidb-over-http)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 TiDB can be reached two ways from a Worker, and they are genuinely different
 backends in cf-knex. Only TiDB Cloud Serverless offers the first one; self-hosted
@@ -60,7 +66,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Streaming** | Not available. `.stream()` throws `UNSUPPORTED_CAPABILITY` — use `.limit()`/`.offset()`. |
 | **Inserted ids** | `insert()` resolves to a **bigint**, because the HTTP protocol returns `lastInsertId` as a decimal string. The same insert over `mysql2` gives a number. `JSON.stringify` throws on bigint — convert with `String(id)` before returning it. |
 | **Isolation levels** | `serializable` is rejected with `UNSUPPORTED_TRANSACTION_MODE` rather than silently downgraded. `readOnly: true` is rejected for the same reason. |
-| **Migrations** | Run them from a plain Node knex process, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process, never from inside the Worker. |
 
 ## Deploy
 

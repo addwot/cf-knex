@@ -1,4 +1,10 @@
-# cf-knex + Postgres
+# [cf-knex](../../README.md) + Postgres
+
+> **A Worker querying Postgres, by URL or through a Hyperdrive binding.**
+
+- Entry point `cf-knex/postgres` · driver [`pg`](https://www.npmjs.com/package/pg)
+- Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-postgres)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 Plain Postgres — self-hosted, RDS, Cloud SQL, anything speaking the wire protocol —
 connected either by URL or through a Hyperdrive binding. For Neon specifically see
@@ -84,7 +90,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Transactions** | Fully supported, including savepoints and isolation levels. |
 | **Streaming** | Supported. `.stream()` works, backed by a real cursor. |
 | **Inserted ids** | Postgres has no `lastInsertId` — use `.returning('id')`. |
-| **Migrations** | Run them from a plain Node knex process against the database, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process against the database, never from inside the Worker. |
 
 ## Deploy
 

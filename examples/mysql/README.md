@@ -1,4 +1,11 @@
-# cf-knex + MySQL
+# [cf-knex](../../README.md) + MySQL
+
+> **A Worker querying MySQL 8 over the wire protocol, by URL or through a Hyperdrive
+> binding.**
+
+- Entry point `cf-knex/mysql` · driver [`mysql2`](https://www.npmjs.com/package/mysql2)
+- Transactions ✓ · streaming ✓ — [what differs](#what-differs-on-mysql)
+- [Knex.js query-builder docs](https://knexjs.org/) · [examples and guide](../README.md) · [package README](../../README.md)
 
 MySQL 8 over the wire protocol, via `mysql2` — connected either by URL or through
 a Hyperdrive binding. MariaDB uses the same adapter; see
@@ -84,7 +91,7 @@ See [`src/index.ts`](src/index.ts) for the complete Worker.
 | **Streaming** | Supported. `.stream()` works, backed by mysql2's row stream. |
 | **Inserted ids** | `insert()` resolves to the auto-increment value — no `.returning()` needed. |
 | **`disableEval`** | cf-knex forces mysql2's `disableEval: true` on every connection. mysql2 compiles its row parsers with `eval` by default, which Workers forbid. This is not configurable, and nothing works without it. |
-| **Migrations** | Run them from a plain Node knex process, never from inside the Worker. |
+| **Migrations** | Run them from a plain Node Knex.js process, never from inside the Worker. |
 
 ## Deploy
 

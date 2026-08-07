@@ -7,12 +7,13 @@ import { createClient as createTursoClient } from '../../src/entries/turso'
 import { createClient, fromEnv } from '../../src/index'
 import type { Knex } from 'knex'
 
-// Every example in README.md, reduced to the part a compiler can check. A
-// README example that doesn't type-check is a defect the rest of the suite
+// Every example in README.md and examples/README.md (the guide, where the
+// per-backend snippets live), reduced to the part a compiler can check. A
+// documented example that doesn't type-check is a defect the rest of the suite
 // can't see: nothing else in this project consumes the public API the way a
-// reader copying a snippet does. Keep these in step with the README —
+// reader copying a snippet does. Keep these in step with both files —
 // including the imports, which are what prove each entry point exports
-// `createClient` under the name the README uses.
+// `createClient` under the name the docs use.
 //
 // This project's `types` project also executes the file as plain JS, so each
 // body stays inside an uncalled closure: `createClient` builds a real knex
@@ -79,6 +80,21 @@ test('README: fromEnv', () => {
     const db = fromEnv({ DB: d1Binding } as unknown as Record<string, unknown>)
     expectTypeOf(db).toMatchTypeOf<Knex>()
     return db('posts').select('*')
+  })
+})
+
+// The README's "Typed rows" example. The row generic goes on the table call,
+// knex's own idiom -- `createClient<T>` sets knex's `TRecord` default for every
+// table at once, which is rarely what you want. What this pins is that cf-knex
+// forwards the generic intact, so `.select()` still narrows to the listed
+// columns rather than collapsing to `any[]`.
+type User = { id: number; email: string; active: boolean }
+
+test('README: typed rows', () => {
+  void (async () => {
+    const db = createTidbClient({ url: 'https://example.tidbcloud.com' })
+    const rows = await db<User>('users').where('active', true).select('id', 'email')
+    expectTypeOf(rows).toEqualTypeOf<Pick<User, 'id' | 'email'>[]>()
   })
 })
 

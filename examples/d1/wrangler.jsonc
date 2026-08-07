@@ -2,7 +2,7 @@
   "name": "cf-knex-example-d1",
   "main": "src/index.ts",
   "compatibility_date": "2025-01-01",
-  // knex itself imports `events` and `timers`, so this flag is required for
+  // Knex.js itself imports `events` and `timers`, so this flag is required for
   // every cf-knex backend, D1 included.
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
