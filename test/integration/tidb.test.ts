@@ -1,5 +1,5 @@
 import type { Knex as KnexType } from 'knex'
-import { expect, test } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { createTidbHttpAdapter } from '../../src/adapters/tidb-http'
 import { createKnexClient } from '../../src/core/client'
 import { runConformanceSuite } from '../support/conformance'
@@ -603,4 +603,50 @@ if (process.env.TIDB_URL) {
   })
 } else {
   skip('tidb-http (TiDB Cloud Serverless)', 'TIDB_URL')
+}
+
+// Needs a *second* Serverless cluster, under different credentials. The suite
+// above pins that stateless connections share one session per credential; this
+// pins the boundary that keeps that from being a tenant problem rather than a
+// scoping quirk.
+//
+// It earns a permanent place because the behaviour it guards is the vendor's,
+// not this library's: the sharing is a gateway optimisation that could widen
+// without notice, and nothing in cf-knex would fail if it did. Measured once by
+// hand across two clusters sharing a gateway host, which is the case worth
+// pinning — isolation held there, so it is enforced per credential rather than
+// by which infrastructure a request happens to land on.
+if (process.env.TIDB_URL && process.env.TIDB_URL_2) {
+  const primary = process.env.TIDB_URL
+  const secondary = process.env.TIDB_URL_2
+
+  describe('tidb-http (cross-credential isolation)', () => {
+    test('session state set through one credential is invisible to another', async () => {
+      const a = createKnexClient(createTidbHttpAdapter({ url: primary }), { pool: { min: 0, max: 1 } })
+      const b = createKnexClient(createTidbHttpAdapter({ url: secondary }), { pool: { min: 0, max: 1 } })
+      const probe = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
+      try {
+        await a.raw(`SET @${probe} = 'from-a'`)
+
+        // The positive control, and the only reason the null below carries
+        // any weight: the same read on the credential that set it must find
+        // the value. Without this, a null on B is equally consistent with the
+        // SET never having run, a misspelt probe name, or a client pointed at
+        // the wrong place — all of which would let this test pass while
+        // asserting nothing at all.
+        const [onA] = (await a.raw(`SELECT @${probe} AS v`)) as [Array<{ v: unknown }>, unknown[]]
+        expect(onA[0]?.v).toBe('from-a')
+
+        const [onB] = (await b.raw(`SELECT @${probe} AS v`)) as [Array<{ v: unknown }>, unknown[]]
+        expect(onB[0]?.v).toBeNull()
+      } finally {
+        await a.destroy()
+        await b.destroy()
+      }
+    })
+  })
+} else {
+  // TIDB_URL_2 leads the placeholder because that is the name CI asserts on,
+  // and the guard matches `(<VAR> ` — see .github/scripts/assert-required-suites-ran.sh.
+  skip('tidb-http (cross-credential isolation)', 'TIDB_URL_2 / TIDB_URL')
 }
