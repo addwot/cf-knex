@@ -1,5 +1,5 @@
-import type { Knex } from 'knex'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import type { DisposableKnex } from '../../src/core/disposable'
 import { CfKnexError } from '../../src/core/errors'
 import type { AdapterCapabilities } from '../../src/core/types'
 
@@ -21,9 +21,12 @@ type ConformanceOptions = AdapterCapabilities & { singleWriter?: boolean }
 // "pool can't supply a second connection" message that is simply untrue.
 const STARVED_POOL_DEADLINE_MS = 10_000
 
-export function runConformanceSuite(name: string, factory: () => Knex, caps: ConformanceOptions) {
+// `DisposableKnex`, not `Knex`, so the `await using` cases below compile: the
+// disposer and the transactor overload that carries it live on that type, and
+// every backend's factory already returns one.
+export function runConformanceSuite(name: string, factory: () => DisposableKnex, caps: ConformanceOptions) {
   describe(`conformance: ${name}`, () => {
-    let db: Knex
+    let db: DisposableKnex
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
 
     beforeAll(async () => {
@@ -133,6 +136,35 @@ export function runConformanceSuite(name: string, factory: () => Knex, caps: Con
           throw new Error('rollback')
         })).rejects.toThrow('rollback')
         expect(await db(table).where('name', 'heidi').first()).toBeFalsy()
+      })
+
+      // The two cases above only exercise knex's callback form, which has
+      // always released on every path. These cover `await using`, the shape the
+      // guide recommends for the transactor form, on the path that matters:
+      // a scope that exits having neither committed nor rolled back. Proven
+      // against a fake adapter in test/unit/destroy.test.ts, but the ROLLBACK
+      // the disposer triggers is issued by the real driver — over HTTP with a
+      // session token on tidb-http, over Hrana on libsql, over their own
+      // connections on mysql2 and pg — so whether the row genuinely fails to
+      // land is a per-backend question that only this suite can answer.
+      test('await using rolls an unfinished transactor back', async () => {
+        {
+          await using trx = await db.transaction()
+          await trx(table).insert({ name: 'ivan', score: 9 })
+        }
+        expect(await db(table).where('name', 'ivan').first()).toBeFalsy()
+      })
+
+      // The inverse, and the one that would break real code if the disposer
+      // were too eager: disposal must be a no-op once the caller has committed,
+      // not a second statement on a finished transaction.
+      test('await using leaves a committed transactor alone', async () => {
+        {
+          await using trx = await db.transaction()
+          await trx(table).insert({ name: 'judy', score: 10 })
+          await trx.commit()
+        }
+        expect(await db(table).where('name', 'judy').first()).toBeTruthy()
       })
 
       // Every case above is purely sequential: BEGIN, INSERT, ROLLBACK, then

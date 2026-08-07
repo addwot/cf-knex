@@ -62,7 +62,6 @@ import { createClient } from 'cf-knex/postgres'
 
 const db = createClient({ url: env.NEON_URL })
 const [row] = await db('posts').insert({ title: 'hello' }).returning('id')
-await db.destroy()
 ```
 
 See [`src/index.ts`](src/index.ts) for the complete Worker.

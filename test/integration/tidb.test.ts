@@ -1,3 +1,4 @@
+import type { Knex as KnexType } from 'knex'
 import { expect, test } from 'vitest'
 import { createTidbHttpAdapter } from '../../src/adapters/tidb-http'
 import { createKnexClient } from '../../src/core/client'
@@ -105,7 +106,11 @@ if (process.env.TIDB_URL) {
   //
   // `authors` and `posts` deliberately share both an `id` and a `name`
   // column, because a colliding name is the case that goes wrong quietly.
-  type Db = ReturnType<typeof createKnexClient>
+  // knex's own type, not `ReturnType<typeof createKnexClient>`: `joined()` below
+  // is handed a transactor as well as the client, and a transactor is a plain
+  // knex object with no `Symbol.asyncDispose` of its own until `transaction()`
+  // attaches one.
+  type Db = KnexType
 
   // `aliceId` and `postId` are handed to the callback rather than assumed to
   // be 1 and 1: TiDB allocates auto-increment values from per-node cached

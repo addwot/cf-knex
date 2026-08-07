@@ -220,12 +220,19 @@ export function createTidbHttpAdapter(opts: TidbHttpAdapterOptions): DriverAdapt
       return toRawResult(result)
     },
 
-    // Every handle that reaches here has already gone through `release()`
-    // above (see the `DriverAdapter` doc comment in ../core/types.ts: tarn
-    // releases everything it holds before `destroy()` runs), which already
-    // rolls back and clears any transaction still open on it. There is no
-    // adapter-level transaction state that outlives an individual handle
-    // for this to close a second time.
+    // Empty because this adapter keeps no state outliving a handle: `release()`
+    // above rolls back and clears whatever transaction that handle held, and
+    // `txStates` is a WeakMap keyed by the handle itself, so there is nothing
+    // left here to close a second time.
+    //
+    // Note this does NOT rely on running after the pool's release pass — the
+    // `DriverAdapter` contract in ../core/types.ts explicitly does not promise
+    // that any more, because `Client.destroy()` bounds how long it waits. A
+    // handle still checked out when that budget expires is one this adapter
+    // never sees again, and its transaction stays open server-side until TiDB
+    // expires it. Nothing reachable from here can close it: the handle is still
+    // held by its abandoning caller, and issuing a ROLLBACK on a different
+    // handle would land on a different TiDB-Session token entirely.
     async destroy(): Promise<void> {},
 
     // No `validate()` — omitted entirely, not just set to a function that

@@ -26,9 +26,16 @@ The global `pnpm` on this machine is v10 and cannot install the pinned
 `packageManager` (pnpm 11.20.0). Prefix with `corepack` — `corepack pnpm test` — or
 `npm i -g pnpm@11.20.0` once.
 
-Local integration suites read `.env` (copy `.env.example`). Any suite whose credential
-is unset registers a named `test.skip` placeholder rather than failing, so `pnpm test`
-is green without the hosted tiers. CI asserts the hosted suites actually ran.
+Local integration suites read `.env` (copy `.env.example`). `vitest.config.ts` loads it via
+`process.loadEnvFile` — keep that: the `node` project reads `process.env`, and miniflare's
+"Using secrets defined in .env" line covers the `workers` project only. Already-set
+variables win, so CI's secrets are never shadowed.
+
+Any suite whose credential is unset registers a named `test.skip` placeholder rather than
+failing, so `pnpm test` is green without the hosted tiers. CI asserts the hosted suites
+actually ran. Locally, check the file count: 26/26 means the backends were reached, 20/26
+means six suites skipped wholesale. Never `source .env` — a value contains an unquoted `&`
+that the shell reads as a job separator and drops; `node --env-file=.env` parses it.
 
 ## Layout
 
@@ -37,9 +44,9 @@ is green without the hosted tiers. CI asserts the hosted suites actually ran.
   and `redact()`), `errors.ts` (`CfKnexError` and its closed `code` union),
   `response.ts`, `types.ts`.
 - `src/index.ts` — the barrel. `buildAdapter`'s switch references all five factories, so
-  this entry is ~6.2 kB and cannot be tree-shaken below that.
+  this entry is ~6.8 kB and cannot be tree-shaken below that.
 - `src/entries/*` — the per-database subpath exports (`cf-knex/tidb`, `/d1`, `/mysql`,
-  `/postgres`, `/turso`), ~3 kB each. They exist so a Worker bundles one adapter. When
+  `/postgres`, `/turso`), ~3.3–3.9 kB each. They exist so a Worker bundles one adapter. When
   you add an adapter, add its entry, its `exports`/`typesVersions` block, and its
   `.size-limit.json` rows.
 

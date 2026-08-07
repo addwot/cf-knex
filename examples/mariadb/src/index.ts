@@ -18,16 +18,18 @@ export default {
     const db = createClient({ url: env.MARIADB_URL })
     // const db = createClient({ hyperdrive: env.HYPERDRIVE })
 
-    try {
-      if (req.method === 'POST') {
-        const [id] = await db('posts').insert({ title: 'hello from a Worker' })
-        return Response.json({ id }, { status: 201 })
-      }
+    // No teardown call: after ordinary queries there is nothing left to close
+    // on any backend. See the Lifetime section of ../../README.md for the
+    // per-backend measurements, and for what *does* need finishing — an
+    // unbalanced transaction. `db.destroy()` still exists, and
+    // `await using db = createClient(...)` calls it for you.
 
-      const posts = await db('posts').select('id', 'title').orderBy('id', 'desc').limit(10)
-      return Response.json(posts)
-    } finally {
-      await db.destroy()
+    if (req.method === 'POST') {
+      const [id] = await db('posts').insert({ title: 'hello from a Worker' })
+      return Response.json({ id }, { status: 201 })
     }
+
+    const posts = await db('posts').select('id', 'title').orderBy('id', 'desc').limit(10)
+    return Response.json(posts)
   },
 }

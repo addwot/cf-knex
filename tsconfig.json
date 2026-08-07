@@ -1,6 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    // Spelled out rather than left implicit. `target: ES2022` alone would pull
+    // in `lib.es2022.full` (ES2022 + DOM + DOM.Iterable + ScriptHost); this
+    // list is that set plus `ESNext.Disposable`, which is what declares
+    // `Symbol.asyncDispose` for src/core/disposable.ts. Dropping any of the
+    // first four is not safe: without the DOM libs, `import.meta.url` loses its
+    // type and test/integration/esm-resolution.test.ts stops compiling.
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "ScriptHost", "ESNext.Disposable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,

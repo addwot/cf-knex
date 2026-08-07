@@ -12,7 +12,7 @@ Turso) connector for Workers, connected directly or through Hyperdrive, featurin
 - transactions on every backend but D1
 - row streaming on MySQL and Postgres
 - Hyperdrive and D1 bindings passed straight through, or found for you by `fromEnv`
-- one entry point per backend, 2.6–3.3 kB brotli, so a Worker bundles a single adapter
+- one entry point per backend, 3.3–3.9 kB brotli, so a Worker bundles a single adapter
 - typed errors where a backend cannot do what was asked, never a generic driver crash
 - a conformance suite run against every backend, hosted tiers included
 
@@ -66,8 +66,7 @@ Your `wrangler.jsonc` needs Node compatibility — Knex.js itself uses `events` 
 
 ## Example
 
-A complete Worker. `db.destroy()` at the end of the request is deliberate — see
-[Lifetime](examples/README.md#lifetime).
+A complete Worker.
 
 ```ts
 import { createClient } from 'cf-knex/tidb'
@@ -75,15 +74,19 @@ import { createClient } from 'cf-knex/tidb'
 export default {
   async fetch(req: Request, env: { TIDB_URL: string }) {
     const db = createClient({ url: env.TIDB_URL })
-    try {
-      const users = await db('users').where('active', true).select('id', 'email')
-      return Response.json(users)
-    } finally {
-      await db.destroy()
-    }
+    const users = await db('users').where('active', true).select('id', 'email')
+    return Response.json(users)
   },
 }
 ```
+
+No teardown call, because after ordinary queries there is nothing to tear down on any
+backend — that is measured, per backend, in [Lifetime](examples/README.md#lifetime).
+`db.destroy()` is still there when you want it, and `await using db = createClient(…)`
+calls it for you. What *does* need finishing is a transaction: use
+`db.transaction(async trx => { … })`, which commits for you, or
+`await using trx = await db.transaction()`, which rolls back unless you call `commit()`
+yourself.
 
 Every other backend is the same Worker with a different import and a different connection
 field — a binding for D1, `hyperdrive` for anything behind Hyperdrive, `url` plus
