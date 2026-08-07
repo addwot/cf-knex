@@ -45,7 +45,7 @@ function buildAdapter(config: ClientConfig, driver: DriverName): DriverAdapter {
       if (config.url === undefined) {
         throw new CfKnexError('NO_CONNECTION', "driver 'tidb-http' requires 'url', which this config does not have")
       }
-      return createTidbHttpAdapter({ url: config.url })
+      return createTidbHttpAdapter({ url: config.url, timeoutMs: config.timeoutMs, fetch: config.fetch })
     case 'pg':
       return createPgAdapter({ url: config.url, connection: config.connection, hyperdrive: config.hyperdrive })
     case 'mysql2':

@@ -44,9 +44,9 @@ that the shell reads as a job separator and drops; `node --env-file=.env` parses
   and `redact()`), `errors.ts` (`CfKnexError` and its closed `code` union),
   `response.ts`, `types.ts`.
 - `src/index.ts` — the barrel. `buildAdapter`'s switch references all five factories, so
-  this entry is ~6.8 kB and cannot be tree-shaken below that.
+  this entry is ~7.1 kB and cannot be tree-shaken below that.
 - `src/entries/*` — the per-database subpath exports (`cf-knex/tidb`, `/d1`, `/mysql`,
-  `/postgres`, `/turso`), ~3.3–3.9 kB each. They exist so a Worker bundles one adapter. When
+  `/postgres`, `/turso`), ~3.3–4.3 kB each. They exist so a Worker bundles one adapter. When
   you add an adapter, add its entry, its `exports`/`typesVersions` block, and its
   `.size-limit.json` rows.
 
@@ -90,6 +90,13 @@ in `test/env.d.ts`; `process.env` is empty there.
   "Hyperdrive does not currently support MySQL AuthSwitchRequest messages" (observed
   2026-08-06). TiDB Dedicated and self-hosted TiDB are fine — they are ordinary MySQL
   origins.
+- **`@tidbcloud/serverless` sets no timeout and no retry.** `postQuery` in its `dist/`
+  calls `fetch` with no `signal`, so before `timeoutMs` existed nothing in the stack could
+  end a stalled request. That is what a green-then-red CI pair on identical code turned
+  out to be (2026-08-07): one statement hung past 30 s while every other statement in the
+  same run kept its usual timing, so the cluster was healthy and a single request simply
+  never returned. `timeoutMs` both passes an `AbortSignal` *and* races it — passing alone
+  only bounds a `fetch` that honours signals, and a caller's own wrapper need not.
 - **Hyperdrive does not support MySQL `COM_STMT_PREPARE`.** The mysql2 adapter calls
   `conn.query()`, never `.execute()`, which is why it works. Do not "optimise" that into
   prepared statements.
