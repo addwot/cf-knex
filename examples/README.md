@@ -295,6 +295,13 @@ credentials — including one issued by a separate `createClient(…)`. Do not u
 state to carry anything request-scoped. Transactions are exempt: `BEGIN` allocates a
 private `txn_`-prefixed session.
 
+Settings with no name of their own are worse than visible — they are *replaced*. `SET
+time_zone` shifts how every other client reads a datetime literal, `SET sql_mode` changes
+how their SQL parses (`PIPES_AS_CONCAT` turns `||` from OR into concatenation), and a
+`USE` redirects where their *unqualified* table names resolve — turning a correct query
+into one that quietly reads the wrong table. Set these on the cluster rather than per
+session, and do not issue `USE` at all.
+
 [tidb-61]: https://github.com/tidbcloud/serverless-js/issues/61
 
 **TiDB Serverless over HTTP cannot stream.** The driver awaits `response.json()` in full
