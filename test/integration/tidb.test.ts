@@ -375,20 +375,47 @@ if (process.env.TIDB_URL) {
 
   // tidbcloud/serverless-js#65 and PR #66: `lastInsertId` used to overflow a JS
   // number and is now a decimal string, which this adapter widens to a bigint.
-  // AUTO_RANDOM is where that matters — its ids routinely exceed
-  // Number.MAX_SAFE_INTEGER, so a lossy round trip through `number` produces an
-  // id that looks plausible and matches no row.
+  // AUTO_RANDOM is where that matters — a lossy round trip through `number`
+  // yields an id that looks plausible and matches no row.
+  //
+  // AUTO_RANDOM on its own cannot demonstrate that, which is the trap this test
+  // fell into. TiDB fills the top 5 bits with a random shard and the rest with a
+  // sequence, so roughly one insert in 32 draws shard 0 and gets an id like 38 —
+  // comfortably inside `number`. Asserting on an unbased AUTO_RANDOM id is
+  // therefore a ~3% flake, and it is what took the `live` job red on
+  // 2026-08-10. Measured before being written down: 160 inserts produced
+  // shards uniform over 0–31 and six ids at or below MAX_SAFE_INTEGER.
+  //
+  // AUTO_RANDOM_BASE removes the randomness from the part that matters without
+  // removing the shard. The sequence occupies the low 58 bits, so starting it
+  // at 2^54 + 1 puts every id past 2^54 whatever shard is drawn. That constant
+  // is also chosen to be unrepresentable as a double from either direction: it
+  // is odd, so shard 0 lands just above 2^53 where doubles step by 2; and it is
+  // ≡ 1 (mod 32), so any higher shard lands past 2^58 where they step by at
+  // least 32. Verified against a live cluster across fresh tables — the
+  // sequence part came back as exactly this constant every time, shard 0
+  // included.
   test('an AUTO_RANDOM insert id survives as a bigint and finds its own row (serverless-js#65)', async () => {
     const db = createKnexClient(createTidbHttpAdapter({ url }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
-      await db.raw(`CREATE TABLE ?? (id BIGINT NOT NULL AUTO_RANDOM, name VARCHAR(64), PRIMARY KEY (id))`, [table])
-      const [id] = await db(table).insert({ name: 'auto-random' })
+      await db.raw(
+        `CREATE TABLE ?? (id BIGINT NOT NULL AUTO_RANDOM, name VARCHAR(64), PRIMARY KEY (id))
+         AUTO_RANDOM_BASE = 18014398509481985`,
+        [table],
+      )
+      const [returned] = await db(table).insert({ name: 'auto-random' })
+      // knex types `insert()` as `number[]`; this adapter really hands back a
+      // bigint, which is the property under test.
+      const id = returned as unknown as bigint
 
       expect(typeof id).toBe('bigint')
-      // The precision claim, made concrete: this is the exact value that a
-      // number round trip would have rounded away.
-      expect((id as unknown as bigint) > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true)
+      expect(id > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true)
+      // The precision claim itself, rather than a proxy for it: clearing
+      // MAX_SAFE_INTEGER does not by itself mean a `number` would corrupt the
+      // value — doubles hold every even integer up to 2^54 exactly. This is the
+      // assertion that fails the moment the adapter stops widening to bigint.
+      expect(BigInt(Number(id))).not.toBe(id)
 
       // The id is only trustworthy if it selects the row it belongs to.
       const found = (await db(table).where('id', String(id)).first()) as { name?: string } | undefined
