@@ -1,6 +1,8 @@
 import { expect, test } from 'vitest'
+import type { Knex } from 'knex'
 import { createPgAdapter, resolveConfig } from '../../src/adapters/pg'
 import { createKnexClient } from '../../src/core/client'
+import { CfKnexError } from '../../src/core/errors'
 import { runConformanceSuite } from '../support/conformance'
 
 const caps = { streaming: true, transactions: true }
@@ -89,6 +91,111 @@ test('pg adapter hyperdrive config reads only connectionString, never the five c
   }
   expect(Object.keys(resolveConfig({ hyperdrive }))).toEqual(['connectionString'])
 })
+
+// `COMMIT_SILENTLY_ROLLED_BACK` is raised by the pg adapter's `execute()`
+// (src/adapters/pg.ts) when postgres reports a `COMMIT` back as a `ROLLBACK`.
+// The conformance suite reaches that only through `db.transaction(cb)`, where
+// knex hands the error to the transaction's own promise and the caller does
+// see it. These cover the path that suite never took: the caller committing
+// the transaction itself, where knex swallowed the rejection and
+// `await trx.commit()` resolved as though the write had landed — silent loss
+// of exactly the work this error code exists to report. Each asserts the row
+// is really gone as well as that the error arrived, so none can pass by the
+// guard degrading into a false positive that rejects a healthy commit; the
+// third pins that healthy case directly.
+if (process.env.POSTGRES_URL) {
+  const url = process.env.POSTGRES_URL
+
+  async function withAbortedTransaction(commit: (trx: Knex.Transaction) => Promise<void>) {
+    const db = createKnexClient(createPgAdapter({ url }))
+    const table = `cfk_commit_guard_${Math.floor(Math.random() * 1e9).toString(36)}`
+    try {
+      await db.schema.createTable(table, (t) => t.integer('id'))
+      const trx = await db.transaction()
+      await trx(table).insert({ id: 1 })
+      // Aborts the transaction server-side, and swallowing it is the point:
+      // an error allowed to propagate would roll back visibly instead.
+      await trx.raw('select * from a_table_that_does_not_exist_cfk').catch(() => {})
+      let raised: unknown
+      try {
+        await commit(trx)
+      } catch (err) {
+        raised = err
+      }
+      const rows = await db(table).select('*')
+      await db.schema.dropTableIfExists(table)
+      return { raised, rows }
+    } finally {
+      await db.destroy()
+    }
+  }
+
+  test('pg: a COMMIT executed as a ROLLBACK reaches the caller of trx.commit()', async () => {
+    const { raised, rows } = await withAbortedTransaction(async (trx) => {
+      await trx.commit()
+    })
+    expect(raised).toBeInstanceOf(CfKnexError)
+    expect((raised as CfKnexError).code).toBe('COMMIT_SILENTLY_ROLLED_BACK')
+    expect(rows).toEqual([])
+  })
+
+  test('pg: the same holds for `await using trx` + commit(), which the guide recommends', async () => {
+    const { raised, rows } = await withAbortedTransaction(async (trx) => {
+      await using disposable = trx as Knex.Transaction & AsyncDisposable
+      await disposable.commit()
+    })
+    expect(raised).toBeInstanceOf(CfKnexError)
+    expect((raised as CfKnexError).code).toBe('COMMIT_SILENTLY_ROLLED_BACK')
+    expect(rows).toEqual([])
+  })
+
+  // The escape hatch `COMMIT_SILENTLY_ROLLED_BACK`'s message and the guide both
+  // now point callers at, pinned here so the advice cannot rot: a statement run
+  // inside a nested transaction (a SAVEPOINT) may fail without aborting the
+  // outer transaction, so the work around it still commits. This is the only
+  // answer to "can the loss be prevented" — once postgres has aborted the
+  // transaction it rejects everything with 25P02, retries included, so there is
+  // nothing to recover after the fact.
+  test('pg: a failure inside a nested transaction does not cost the outer transaction its work', async () => {
+    const db = createKnexClient(createPgAdapter({ url }))
+    const table = `cfk_savepoint_${Math.floor(Math.random() * 1e9).toString(36)}`
+    try {
+      await db.schema.createTable(table, (t) => t.integer('id'))
+      const trx = await db.transaction()
+      await trx(table).insert({ id: 1 })
+      await expect(
+        trx.transaction(async (sp) => {
+          await sp.raw('select * from a_table_that_does_not_exist_cfk')
+        }),
+      ).rejects.toThrow()
+      // Still usable, which is the whole point — an aborted transaction would
+      // reject this with 25P02.
+      await trx(table).insert({ id: 2 })
+      await expect(trx.commit()).resolves.not.toThrow()
+      expect(await db(table).select('*')).toEqual([{ id: 1 }, { id: 2 }])
+      await db.schema.dropTableIfExists(table)
+    } finally {
+      await db.destroy()
+    }
+  })
+
+  test('pg: a healthy explicit commit still persists its work', async () => {
+    const db = createKnexClient(createPgAdapter({ url }))
+    const table = `cfk_commit_ok_${Math.floor(Math.random() * 1e9).toString(36)}`
+    try {
+      await db.schema.createTable(table, (t) => t.integer('id'))
+      const trx = await db.transaction()
+      await trx(table).insert({ id: 1 })
+      await expect(trx.commit()).resolves.not.toThrow()
+      expect(await db(table).select('*')).toEqual([{ id: 1 }])
+      await db.schema.dropTableIfExists(table)
+    } finally {
+      await db.destroy()
+    }
+  })
+} else {
+  skip('pg (explicit commit surfaces COMMIT_SILENTLY_ROLLED_BACK)', 'POSTGRES_URL')
+}
 
 if (process.env.POSTGRES_URL) {
   const hyperdrive = hyperdriveFrom(process.env.POSTGRES_URL)

@@ -476,6 +476,154 @@ test('db.transaction() uses the adapter-supplied transactions hint when present,
   await dbCustom.destroy()
 })
 
+// The bug these three cover: knex's execution/transaction.js `query()` catches
+// whatever the COMMIT statement threw, assigns it to the transaction's *own*
+// promise via `_rejecter`, and then resolves the promise `commit()` returned
+// anyway. In the callback form that is harmless — `db.transaction(cb)` returns
+// the transaction's promise, so the caller still sees the error. On the bare
+// transactor form it loses the error outright: make-knex.js's `_transaction()`
+// wires that promise to a `reject` it has already resolved, so nothing is
+// listening, and `await trx.commit()` resolves as if the commit had succeeded.
+// The write is gone and the caller is told it worked.
+//
+// Driven through the fake adapter rather than a real database because the
+// mechanism is knex's, not any backend's: any adapter error on COMMIT — a
+// dropped connection mid-commit, postgres turning it into a ROLLBACK — is
+// swallowed the same way. test/integration/pg.test.ts covers the real
+// COMMIT_SILENTLY_ROLLED_BACK case this was found through.
+test('await trx.commit() rejects when the COMMIT fails, instead of resolving as though it succeeded', async () => {
+  const { adapter } = createFakeAdapter({
+    dialect: 'mysql',
+    failExecute: (sql) => (/^COMMIT/i.test(sql) ? new Error('commit refused by server') : undefined),
+  })
+  const db = createKnexClient(adapter)
+  const trx = await db.transaction()
+  await trx.raw('select 1')
+  await expect(trx.commit()).rejects.toThrow('commit refused by server')
+  await db.destroy()
+})
+
+test('await using trx + commit() surfaces a failed COMMIT (the pattern the guide recommends)', async () => {
+  // Asserts on object identity rather than the message, and not to dodge
+  // knex's `${sql} - ${message}` prefix: identity is the property the pg
+  // integration test depends on. Surfacing a *copy* would satisfy any message
+  // assertion while stripping the class and `code` off a `CfKnexError`,
+  // leaving `err.code === 'COMMIT_SILENTLY_ROLLED_BACK'` — the whole point of
+  // routing the error out — unreachable. knex mutates `message` on the
+  // adapter's own error and rethrows it, so the caller must get that instance.
+  const failure = new Error('commit refused by server')
+  const { adapter } = createFakeAdapter({
+    dialect: 'mysql',
+    failExecute: (sql) => (/^COMMIT/i.test(sql) ? failure : undefined),
+  })
+  const db = createKnexClient(adapter)
+  let seen: unknown
+  {
+    await using trx = await db.transaction()
+    await trx.raw('select 1')
+    try {
+      await trx.commit()
+    } catch (err) {
+      seen = err
+    }
+  }
+  expect(seen).toBe(failure)
+  await db.destroy()
+})
+
+test('a successful commit still resolves, and the callback form still reports a failed COMMIT', async () => {
+  // The other half of the fix: surfacing the swallowed error must not invent
+  // one. A healthy `commit()` resolves, and the callback form — which already
+  // propagated correctly before — keeps doing so rather than being rerouted
+  // into knex's `.catch(err => transactor.rollback(err))` branch.
+  const healthy = createFakeAdapter({ dialect: 'mysql' })
+  const dbHealthy = createKnexClient(healthy.adapter)
+  const trx = await dbHealthy.transaction()
+  await trx.raw('select 1')
+  await expect(trx.commit()).resolves.not.toThrow()
+  // The exact statement sequence, not just "a COMMIT happened": this is what
+  // makes the fix free on the working path. Surfacing the swallowed error is a
+  // promise handler on a promise knex already created — it issues no statement
+  // of its own, so a transactor-form transaction still costs exactly three
+  // round trips. A future fix that reached for `SAVEPOINT`, a status query, or
+  // a second COMMIT attempt would show up here as a fourth entry rather than as
+  // an unexplained latency regression against a live database.
+  expect(healthy.calls.map((c) => c.sql)).toEqual(['BEGIN;', 'select 1', 'COMMIT;'])
+  await dbHealthy.destroy()
+
+  const { adapter } = createFakeAdapter({
+    dialect: 'mysql',
+    failExecute: (sql) => (/^COMMIT/i.test(sql) ? new Error('commit refused by server') : undefined),
+  })
+  const db = createKnexClient(adapter)
+  await expect(
+    db.transaction(async (t) => {
+      await t.raw('select 1')
+    }),
+  ).rejects.toThrow('commit refused by server')
+  await db.destroy()
+})
+
+test('a failed query the caller already handled does not poison a later successful commit', async () => {
+  // The precise scope of what `commit()` now reports. It rejects with whatever
+  // knex routed to the transaction's execution promise, and only knex's own
+  // BEGIN/COMMIT/ROLLBACK/SAVEPOINT statements go down that path
+  // (execution/transaction.js) — a failing *user* query rejects the query's own
+  // promise and leaves the transaction alone. So a caller who catches a failed
+  // query and commits the rest must still get a resolved `commit()`.
+  //
+  // This pins that boundary rather than re-testing the fix: it passes for any
+  // implementation built on the execution promise, because knex never puts a
+  // user query's error there. What it does catch is a future fix rebuilt on a
+  // broader signal — remembering the last error `adapter.execute()` threw, say —
+  // which would turn every handled query error into a spurious commit
+  // rejection, reporting work lost when it landed. Same silent wrongness as the
+  // bug, inverted, and the reason the fix reads the execution promise
+  // specifically.
+  const { adapter, calls } = createFakeAdapter({
+    dialect: 'mysql',
+    failExecute: (sql) => (/nonexistent/i.test(sql) ? new Error('no such table') : undefined),
+  })
+  const db = createKnexClient(adapter)
+  const trx = await db.transaction()
+  await trx.raw('select 1')
+  await expect(trx.raw('select * from nonexistent')).rejects.toThrow('no such table')
+  await expect(trx.commit()).resolves.not.toThrow()
+  expect(calls.some((c) => /^COMMIT/i.test(c.sql))).toBe(true)
+  expect(calls.some((c) => /^ROLLBACK/i.test(c.sql))).toBe(false)
+  await db.destroy()
+})
+
+test('abandoning a transactor whose ROLLBACK fails does not raise an unhandled rejection', async () => {
+  // `surfaceFailedCommit` attaches a handler to the execution promise the
+  // moment the transactor is created, whether or not the caller ever commits.
+  // A rejection nobody consumes is a process-level unhandled rejection, and in
+  // a Worker that is an error the request never asked for — so the handler must
+  // convert the rejection to a value rather than re-throw. Exercised through
+  // `await using`, whose disposal issues the ROLLBACK that fails here.
+  const errors: unknown[] = []
+  const onUnhandled = (e: unknown) => errors.push(e)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const { adapter } = createFakeAdapter({
+      dialect: 'mysql',
+      failExecute: (sql) => (/^ROLLBACK/i.test(sql) ? new Error('rollback refused by server') : undefined),
+    })
+    const db = createKnexClient(adapter)
+    {
+      await using trx = await db.transaction()
+      await trx.raw('select 1')
+    }
+    // One macrotask is where an unhandled rejection is reported: the check is
+    // meaningless on the same tick the promise rejects.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await db.destroy()
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+  expect(errors).toEqual([])
+})
+
 test('sequential queries reuse a pooled connection instead of acquiring one per query (regression)', async () => {
   // Regression coverage for the original bug: `createKnexClient` used to
   // override knex's higher-level `acquireConnection`/`releaseConnection`

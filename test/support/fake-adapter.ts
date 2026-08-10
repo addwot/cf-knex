@@ -44,6 +44,17 @@ export function createFakeAdapter(opts: {
   // settles exercises the timeout. Omitted entirely unless set, like every
   // other option here.
   hangOnDestroy?: boolean
+  // Lets a test fail one specific statement without a database, by returning
+  // an error for the SQL it cares about and `undefined` for everything else.
+  // Needed for the statements knex issues *itself* — `BEGIN`, `COMMIT`,
+  // `ROLLBACK`, `SAVEPOINT` — which a test can't reach through a query
+  // builder at all, and whose failure knex handles on a different path from a
+  // failing user query (execution/transaction.js's `query()` swallows the
+  // rejection and re-routes it to the transaction's own promise). Distinct
+  // from making every `execute()` reject: the transaction has to get far
+  // enough to open and do work before the statement under test runs.
+  // Omitted entirely unless set, like every other option here.
+  failExecute?: (sql: string) => Error | undefined
 }) {
   const calls: Array<{ sql: string; bindings: unknown[] }> = []
   // `createKnexClient` (src/core/client.ts) wires `acquire`/`release`/
@@ -79,6 +90,8 @@ export function createFakeAdapter(opts: {
     execute: async (h, sql, bindings) => {
       calls.push({ sql, bindings })
       usedOnce.add(h)
+      const failure = opts.failExecute?.(sql)
+      if (failure) throw failure
       return { rows: [], ...opts.result } as RawResult
     },
     destroy: async () => {
