@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { createTidbHttpAdapter } from '../../src/adapters/tidb-http'
 import { createKnexClient } from '../../src/core/client'
 import { runConformanceSuite } from '../support/conformance'
+import { STALL_BUDGET_MS } from '../support/stall'
 
 // Same placeholder-instead-of-silence rule as test/integration/mysql2.test.ts:
 // a missing URL must read as "not run here", never as a pass and never as a
@@ -10,22 +11,6 @@ import { runConformanceSuite } from '../support/conformance'
 function skip(name: string, envVar: string) {
   test.skip(`${name} (${envVar} not set)`, () => {})
 }
-
-// `@tidbcloud/serverless` calls `fetch` with no signal, so a request that never
-// comes back has nothing in the stack to end it. That is not hypothetical: it
-// has taken the `live` job red twice (2026-08-06 and 2026-08-10), both times as
-// an opaque `Test timed out in 30000ms` thirty seconds after a single statement
-// stalled while every other statement in the same run kept its usual timing.
-//
-// Bounding every client in this file turns that into a CfKnexError naming the
-// transport. The point is not only the faster failure — it is that a stalled
-// request now fails *differently* from a genuine deadlock inside cf-knex, so
-// vitest.config.ts can retry the one without also retrying the other. A hang
-// this library is responsible for still burns the full 30 s and still goes red.
-//
-// Sized at roughly seven times the slowest statement observed against a live
-// cluster (2.2 s), and well under vitest's 30 s testTimeout so this fires first.
-const STALL_BUDGET_MS = 15_000
 
 if (process.env.TIDB_URL) {
   const url = process.env.TIDB_URL

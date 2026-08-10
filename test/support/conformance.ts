@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import type { DisposableKnex } from '../../src/core/disposable'
 import { CfKnexError } from '../../src/core/errors'
 import type { AdapterCapabilities } from '../../src/core/types'
+import { retryStalledRequest } from './stall'
 
 // `singleWriter` describes the *database*, not the adapter, which is why it
 // isn't part of `AdapterCapabilities`: SQLite-family engines (libsql, Turso,
@@ -29,17 +30,27 @@ export function runConformanceSuite(name: string, factory: () => DisposableKnex,
     let db: DisposableKnex
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
 
+    // Setup and teardown go through `retryStalledRequest` because vitest's own
+    // retry covers test bodies only: a stalled statement here fails the hook,
+    // and a failed hook skips every test in the suite rather than retrying one.
+    // Inert for backends that do not set `timeoutMs` — see test/support/stall.ts.
     beforeAll(async () => {
       db = factory()
-      await db.schema.createTable(table, (t) => {
-        t.increments('id')
-        t.string('name')
-        t.integer('score').nullable()
+      await retryStalledRequest(async (attempt) => {
+        // A request aborted at its budget may still have been applied, so a
+        // second attempt cannot assume the table is absent.
+        if (attempt > 1) await db.schema.dropTableIfExists(table)
+        await db.schema.createTable(table, (t) => {
+          t.increments('id')
+          t.string('name')
+          t.integer('score').nullable()
+        })
       })
     })
 
     afterAll(async () => {
-      await db.schema.dropTableIfExists(table)
+      // Already idempotent, so it needs no per-attempt handling.
+      await retryStalledRequest(() => db.schema.dropTableIfExists(table))
       await db.destroy()
     })
 
