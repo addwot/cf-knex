@@ -1,5 +1,6 @@
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { defineConfig } from 'vitest/config'
+import { HOOK_TIMEOUT_MS } from './test/support/stall'
 
 // The `node` project reads `process.env` and nothing else fills it — the
 // "Using secrets defined in .env" line is miniflare's and covers `workers`
@@ -95,7 +96,16 @@ export default defineConfig({
           // 2026-08-06 and 2026-08-10), and a job that cries wolf gets ignored.
           retry: { count: 2, delay: 1_000, condition: /timeoutMs budget/ },
           testTimeout: 30_000,
-          hookTimeout: 30_000,
+          // Larger than `testTimeout`, which is not an oversight. A stall in a
+          // hook cannot be retried by the option above — vitest retries test
+          // bodies only — so test/support/stall.ts carries its own retry for
+          // hooks, and this has to be the outer bound of the two: that helper
+          // spends up to `RETRY_BUDGET_MS` before it gives up and rethrows the
+          // CfKnexError naming the budget. When this was the smaller number,
+          // vitest killed the hook first and reported an anonymous `Hook timed
+          // out in 30000ms`, discarding that attribution entirely. Imported
+          // rather than written out again so the ordering cannot drift.
+          hookTimeout: HOOK_TIMEOUT_MS,
         },
       },
       {
