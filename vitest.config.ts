@@ -72,10 +72,28 @@ export default defineConfig({
           // 971ms, so the default left under 5x margin against a transport
           // whose tail latency is not ours to control.
           //
-          // Deliberately not `retry`: the assertions never disagreed with the
-          // database, they ran out of clock. Retrying would also paper over a
-          // genuine intermittent bug in the adapters, which is the one class
-          // of defect this suite exists to catch.
+          // `retry` was deliberately absent here, on the grounds that the
+          // assertions never disagreed with the database — they ran out of
+          // clock — and that retrying would paper over a genuine intermittent
+          // bug in the adapters, which is the one class of defect this suite
+          // exists to catch. That reasoning still stands, and every failure
+          // this config can only see as a bare timeout is still unretried.
+          //
+          // What changed is that a stalled request stopped being one of those.
+          // `@tidbcloud/serverless` fetches without a signal, so a request that
+          // never comes back used to be indistinguishable from a hang: both
+          // arrived as `Test timed out in 30000ms` with nothing to attribute
+          // them to. Now that the TiDB suite bounds its clients with cf-knex's
+          // own `timeoutMs`, a stall instead fails as a CfKnexError naming the
+          // budget it blew — and that is a failure the adapters cannot produce
+          // by being wrong. A real adapter bug returns the wrong answer, or
+          // hangs with no budget to exceed; both still go red on attempt one.
+          //
+          // So this retry is conditional and matches that one message, nothing
+          // else. It exists because the alternative is a `live` job that goes
+          // red on TiDB Cloud Serverless stalls no one here can fix (observed
+          // 2026-08-06 and 2026-08-10), and a job that cries wolf gets ignored.
+          retry: { count: 2, delay: 1_000, condition: /timeoutMs budget/ },
           testTimeout: 30_000,
           hookTimeout: 30_000,
         },
