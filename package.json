@@ -1,6 +1,6 @@
 {
   "name": "cf-knex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Knex.js for Cloudflare Workers - TiDB Serverless, MySQL, Postgres, D1 and Turso, direct or via Hyperdrive",
   "license": "MIT",
   "author": "Bogdan Kolesnyk",
