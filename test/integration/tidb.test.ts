@@ -11,10 +11,26 @@ function skip(name: string, envVar: string) {
   test.skip(`${name} (${envVar} not set)`, () => {})
 }
 
+// `@tidbcloud/serverless` calls `fetch` with no signal, so a request that never
+// comes back has nothing in the stack to end it. That is not hypothetical: it
+// has taken the `live` job red twice (2026-08-06 and 2026-08-10), both times as
+// an opaque `Test timed out in 30000ms` thirty seconds after a single statement
+// stalled while every other statement in the same run kept its usual timing.
+//
+// Bounding every client in this file turns that into a CfKnexError naming the
+// transport. The point is not only the faster failure — it is that a stalled
+// request now fails *differently* from a genuine deadlock inside cf-knex, so
+// vitest.config.ts can retry the one without also retrying the other. A hang
+// this library is responsible for still burns the full 30 s and still goes red.
+//
+// Sized at roughly seven times the slowest statement observed against a live
+// cluster (2.2 s), and well under vitest's 30 s testTimeout so this fires first.
+const STALL_BUDGET_MS = 15_000
+
 if (process.env.TIDB_URL) {
   const url = process.env.TIDB_URL
 
-  runConformanceSuite('tidb-http (TiDB Cloud Serverless)', () => createKnexClient(createTidbHttpAdapter({ url })), {
+  runConformanceSuite('tidb-http (TiDB Cloud Serverless)', () => createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS })), {
     streaming: false,
     transactions: true,
   })
@@ -24,7 +40,7 @@ if (process.env.TIDB_URL) {
   // number for the same insert. The divergence is real and user-visible, so
   // it is pinned here rather than left to be discovered downstream.
   test('insertId comes back as a bigint, where mysql2 gives a number', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -40,7 +56,7 @@ if (process.env.TIDB_URL) {
   })
 
   test('a nested transaction rolls back independently of its parent (savepoint path)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -76,7 +92,7 @@ if (process.env.TIDB_URL) {
   // handle, so this deterministically exercises the poisoned-handle path
   // rather than happening to land on a fresh one.
   test('db.raw(BEGIN) followed by ordinary queries does not poison the connection (regression)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -120,7 +136,7 @@ if (process.env.TIDB_URL) {
   async function withJoinTables(
     fn: (db: Db, authors: string, posts: string, ids: { aliceId: number; postId: number }) => Promise<void>,
   ) {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const authors = `cf_knex_a_${Math.random().toString(36).slice(2, 8)}`
     const posts = `cf_knex_p_${Math.random().toString(36).slice(2, 8)}`
     try {
@@ -233,7 +249,7 @@ if (process.env.TIDB_URL) {
   // above, and just as invisible until a caller does arithmetic on it, so it
   // gets its own assertion rather than living implicitly inside a coercion.
   test('COUNT comes back as a decimal string, where mysql2 gives a number', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -251,7 +267,7 @@ if (process.env.TIDB_URL) {
   })
 
   test('an unsupported isolation level throws rather than being silently ignored', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     try {
       await expect(db.transaction(async () => {}, { isolationLevel: 'serializable' })).rejects.toMatchObject({
         code: 'UNSUPPORTED_TRANSACTION_MODE',
@@ -262,7 +278,7 @@ if (process.env.TIDB_URL) {
   })
 
   test('SET TRANSACTION READ ONLY throws rather than being silently ignored', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     try {
       await expect(db.transaction(async () => {}, { readOnly: true })).rejects.toMatchObject({
         code: 'UNSUPPORTED_TRANSACTION_MODE',
@@ -322,7 +338,7 @@ if (process.env.TIDB_URL) {
   // serially". knex does not serialise these — the adapter does. This is the
   // live proof of that, against the cluster the issue was filed about.
   test('parallel statements inside one transaction all commit (serverless-js#61)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -345,7 +361,7 @@ if (process.env.TIDB_URL) {
   })
 
   test('a parallel statement that fails still rolls the whole transaction back', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -375,20 +391,47 @@ if (process.env.TIDB_URL) {
 
   // tidbcloud/serverless-js#65 and PR #66: `lastInsertId` used to overflow a JS
   // number and is now a decimal string, which this adapter widens to a bigint.
-  // AUTO_RANDOM is where that matters — its ids routinely exceed
-  // Number.MAX_SAFE_INTEGER, so a lossy round trip through `number` produces an
-  // id that looks plausible and matches no row.
+  // AUTO_RANDOM is where that matters — a lossy round trip through `number`
+  // yields an id that looks plausible and matches no row.
+  //
+  // AUTO_RANDOM on its own cannot demonstrate that, which is the trap this test
+  // fell into. TiDB fills the top 5 bits with a random shard and the rest with a
+  // sequence, so roughly one insert in 32 draws shard 0 and gets an id like 38 —
+  // comfortably inside `number`. Asserting on an unbased AUTO_RANDOM id is
+  // therefore a ~3% flake, and it is what took the `live` job red on
+  // 2026-08-10. Measured before being written down: 160 inserts produced
+  // shards uniform over 0–31 and six ids at or below MAX_SAFE_INTEGER.
+  //
+  // AUTO_RANDOM_BASE removes the randomness from the part that matters without
+  // removing the shard. The sequence occupies the low 58 bits, so starting it
+  // at 2^54 + 1 puts every id past 2^54 whatever shard is drawn. That constant
+  // is also chosen to be unrepresentable as a double from either direction: it
+  // is odd, so shard 0 lands just above 2^53 where doubles step by 2; and it is
+  // ≡ 1 (mod 32), so any higher shard lands past 2^58 where they step by at
+  // least 32. Verified against a live cluster across fresh tables — the
+  // sequence part came back as exactly this constant every time, shard 0
+  // included.
   test('an AUTO_RANDOM insert id survives as a bigint and finds its own row (serverless-js#65)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
-      await db.raw(`CREATE TABLE ?? (id BIGINT NOT NULL AUTO_RANDOM, name VARCHAR(64), PRIMARY KEY (id))`, [table])
-      const [id] = await db(table).insert({ name: 'auto-random' })
+      await db.raw(
+        `CREATE TABLE ?? (id BIGINT NOT NULL AUTO_RANDOM, name VARCHAR(64), PRIMARY KEY (id))
+         AUTO_RANDOM_BASE = 18014398509481985`,
+        [table],
+      )
+      const [returned] = await db(table).insert({ name: 'auto-random' })
+      // knex types `insert()` as `number[]`; this adapter really hands back a
+      // bigint, which is the property under test.
+      const id = returned as unknown as bigint
 
       expect(typeof id).toBe('bigint')
-      // The precision claim, made concrete: this is the exact value that a
-      // number round trip would have rounded away.
-      expect((id as unknown as bigint) > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true)
+      expect(id > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true)
+      // The precision claim itself, rather than a proxy for it: clearing
+      // MAX_SAFE_INTEGER does not by itself mean a `number` would corrupt the
+      // value — doubles hold every even integer up to 2^54 exactly. This is the
+      // assertion that fails the moment the adapter stops widening to bigint.
+      expect(BigInt(Number(id))).not.toBe(id)
 
       // The id is only trustworthy if it selects the row it belongs to.
       const found = (await db(table).where('id', String(id)).first()) as { name?: string } | undefined
@@ -405,7 +448,7 @@ if (process.env.TIDB_URL) {
   // per node but neither dense nor globally monotonic. Pinned because the
   // tempting assumption (first insert gets 1) is what breaks downstream.
   test('auto_increment ids are not dense and must not be assumed to start at 1 (serverless-js#79)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.schema.createTable(table, (t) => {
@@ -431,7 +474,7 @@ if (process.env.TIDB_URL) {
   // other half, and it is the half a caller reaches for immediately after
   // getting a bigint id out of an insert.
   test('a bigint binding round-trips through a where-clause (serverless-js PR#52)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.raw(`CREATE TABLE ?? (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id))`, [table])
@@ -455,7 +498,7 @@ if (process.env.TIDB_URL) {
   // user as wrong data rather than an error, which is exactly the class of
   // failure a type assertion catches and a smoke test does not.
   test('column types decode to the documented JS types (prisma-adapter#19/#45, serverless-js PR#55/#58)', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const table = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.raw(
@@ -517,7 +560,7 @@ if (process.env.TIDB_URL) {
   // serves next. Neither layer is misbehaving; the surprise is that "stateless"
   // describes the connection's lifecycle, not the session's.
   test('session state persists across statements on one handle, despite the "stateless" label', async () => {
-    const db = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
     try {
       await db.raw('SET @cf_knex_probe = 42')
       const [rows] = (await db.raw('SELECT @cf_knex_probe AS v')) as [Array<{ v: unknown }>, unknown[]]
@@ -540,8 +583,8 @@ if (process.env.TIDB_URL) {
   // scoped to anything cf-knex controls, so it must not be used to carry
   // anything a caller would mind another request seeing.
   test('session state crosses between separate clients, because stateless connections share one session', async () => {
-    const first = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
-    const second = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
+    const first = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
+    const second = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
     // A fresh name per run: a fixed one would be set by earlier runs against
     // the same shared session, which would make this pass without proving
     // anything.
@@ -568,8 +611,8 @@ if (process.env.TIDB_URL) {
     // `stateless_` one. This is what makes a transaction's reads and writes
     // genuinely its own, and what the session-escape detector is checking has
     // not silently stopped being true.
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
-    const observer = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
+    const observer = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     const probe = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
     try {
       await db.transaction(async (trx) => {
@@ -589,7 +632,7 @@ if (process.env.TIDB_URL) {
     // transaction *is* one session, so the variable persists. If this ever
     // fails while the test above passes, statements are escaping the
     // transaction.
-    const db = createKnexClient(createTidbHttpAdapter({ url }))
+    const db = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
     try {
       const v = await db.transaction(async (trx) => {
         await trx.raw('SET @cf_knex_probe = 42')
@@ -640,8 +683,8 @@ if (process.env.TIDB_URL_2) {
     // the strongest separation a caller can build without a second credential,
     // and still not enough to get a session of their own.
     async function withTwoClients(fn: (setter: KnexType, reader: KnexType) => Promise<void>) {
-      const setter = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
-      const reader = createKnexClient(createTidbHttpAdapter({ url }), { pool: { min: 0, max: 1 } })
+      const setter = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
+      const reader = createKnexClient(createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
       try {
         await fn(setter, reader)
       } finally {
@@ -751,8 +794,8 @@ if (process.env.TIDB_URL && process.env.TIDB_URL_2) {
 
   describe('tidb-http (cross-credential isolation)', () => {
     test('session state set through one credential is invisible to another', async () => {
-      const a = createKnexClient(createTidbHttpAdapter({ url: primary }), { pool: { min: 0, max: 1 } })
-      const b = createKnexClient(createTidbHttpAdapter({ url: secondary }), { pool: { min: 0, max: 1 } })
+      const a = createKnexClient(createTidbHttpAdapter({ url: primary, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
+      const b = createKnexClient(createTidbHttpAdapter({ url: secondary, timeoutMs: STALL_BUDGET_MS }), { pool: { min: 0, max: 1 } })
       const probe = `cf_knex_${Math.random().toString(36).slice(2, 10)}`
       try {
         await a.raw(`SET @${probe} = 'from-a'`)
