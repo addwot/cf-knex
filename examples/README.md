@@ -319,7 +319,24 @@ Read one back with `new Date(row.created_at)`. **D1 also rejects `bigint` bindin
 
 **A Postgres `COMMIT` can silently roll back.** If a statement inside the transaction
 already aborted it, Postgres executes the `COMMIT` as a `ROLLBACK` and reports success.
-cf-knex throws `COMMIT_SILENTLY_ROLLED_BACK` instead.
+cf-knex throws `COMMIT_SILENTLY_ROLLED_BACK` instead. By then the work is gone and cannot
+be recovered — Postgres rejects every statement on an aborted transaction with `25P02`,
+a retry of the lost write included. If you need a statement to be allowed to fail, run it
+in a nested transaction, which is a `SAVEPOINT` Postgres can roll back to:
+
+```ts
+const trx = await db.transaction()
+await trx('users').insert({ email })
+// This may fail without taking the insert above with it.
+await trx.transaction(async sp => {
+  await sp('audit').insert({ email })
+}).catch(() => {})
+await trx.commit()   // commits the insert
+```
+
+Measured on Neon, a `SAVEPOINT`/`RELEASE` pair around each statement costs about 3×
+the wall clock of the same statements unprotected (25 inserts: 0.96 s → 3.1 s), which is
+why cf-knex does not wrap your statements for you.
 
 **SQLite-family databases allow one writer at a time**, so concurrent writes on D1, Turso
 and libsql serialise rather than interleave. And `db.raw()` returns the driver's own
@@ -379,6 +396,13 @@ Dropping it is silent: no error, no warning, and the insert simply is not there.
 back is the right default for a disposer, and it is what every other language does with
 this pattern, but it is the opposite of the callback form. Read a refactor between the two
 carefully.
+
+**A failed `commit()` rejects**, in both forms. Awaiting it is how you learn the work did
+not land — including the Postgres case above, where the server executes the `COMMIT` as a
+`ROLLBACK` and reports success, and `await trx.commit()` rejects with
+`COMMIT_SILENTLY_ROLLED_BACK`. Up to and including 0.3.0 that error was lost on the
+transactor form and `commit()` resolved as though the write were there, so on those
+versions `await` alone was not enough to catch it.
 
 `await using` needs TypeScript 5.2+ with `lib` at `esnext.disposable` or later, and a
 runtime that supports it (workerd does). Without it, use the callback form.

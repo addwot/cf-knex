@@ -262,6 +262,75 @@ async function disposeTransactor(transactor: object): Promise<void> {
   await trx.rollback()
 }
 
+/**
+ * Makes `await trx.commit()` reject when the COMMIT actually failed.
+ *
+ * knex swallows that failure. `Transaction.query()`
+ * (knex/lib/execution/transaction.js) catches whatever the COMMIT statement
+ * threw, assigns it to the transaction's own promise through `_rejecter`, and
+ * resolves the promise it handed `commit()` anyway. In the callback form that
+ * costs nothing — `db.transaction(cb)` *is* that promise, so the caller still
+ * sees the error. In the transactor form it loses it outright:
+ * `_transaction()` (knex/lib/knex-builder/make-knex.js) wires the promise to a
+ * `reject` belonging to a promise it has already resolved with the transactor,
+ * so nothing is listening, and `await trx.commit()` resolves as though the
+ * work had landed.
+ *
+ * That is silent data loss rather than a reporting nicety. The case it was
+ * found through is postgres executing a COMMIT as a ROLLBACK, which
+ * src/adapters/pg.ts raises `COMMIT_SILENTLY_ROLLED_BACK` for — an error whose
+ * entire purpose is to say the work is gone, and which never reached the
+ * caller on this path. Nothing about it is postgres-specific: a connection
+ * dropped mid-COMMIT is discarded the same way, on every adapter.
+ *
+ * Applied only to the transactor form, decided by the same signal knex itself
+ * uses — a container whose return value is not thenable is one knex will not
+ * chain `commit`/`rollback` onto (`_onAcquire`, transaction.js). The callback
+ * form is left alone: it already propagates, and rejecting its `commit()` here
+ * would divert it into knex's own `.catch(err => transactor.rollback(err))`,
+ * issuing a ROLLBACK against a transaction that is already finished.
+ *
+ * The execution promise is observed with a handler that converts a rejection
+ * into a value rather than by consuming it, so this neither swallows the error
+ * from anyone else awaiting it nor leaves it unhandled when the caller
+ * abandons the transaction instead of committing. `undefined` is the sentinel
+ * for "settled cleanly"; knex guarantees a non-`undefined` rejection reason,
+ * substituting an Error of its own when a caller rejects with nothing.
+ */
+// Deliberately the same duck-test knex's own `_onAcquire` applies to a
+// container's return value (`result && result.then && typeof result.then ===
+// 'function'`), not `instanceof Promise`: matching it exactly is what keeps
+// "knex will chain commit/rollback onto this" and "cf-knex leaves commit alone"
+// the same predicate.
+function isThenable(value: unknown): boolean {
+  return typeof (value as { then?: unknown } | null | undefined)?.then === 'function'
+}
+
+function surfaceFailedCommit(transactor: object): void {
+  const trx = transactor as {
+    commit?: (value?: unknown) => Promise<unknown>
+    executionPromise?: Promise<unknown>
+  }
+  const commit = trx.commit
+  const executionPromise = trx.executionPromise
+  if (typeof commit !== 'function' || typeof executionPromise?.then !== 'function') return
+
+  const outcome = Promise.resolve(executionPromise).then(
+    () => undefined,
+    (err: unknown) => err,
+  )
+
+  trx.commit = async (value?: unknown) => {
+    const result = await commit.call(transactor, value)
+    // Safe to await: `commit()` routes through `Transaction.query(…, 1, …)`,
+    // which settles the execution promise via `_resolver`/`_rejecter` before
+    // the promise awaited above resolves, so this is already decided.
+    const failure = await outcome
+    if (failure !== undefined) throw failure
+    return result
+  }
+}
+
 function defineAsyncDispose(target: object, dispose: () => Promise<void>): void {
   if (typeof Symbol.asyncDispose !== 'symbol') return
   if (Symbol.asyncDispose in target) return
@@ -489,11 +558,18 @@ export function createKnexClient<TRecord extends {} = any, TResult = unknown[]>(
       // passes `resolve` — so wrapping here covers `db.transaction(async trx =>
       // …)`, the transactor form, and nested savepoints identically, with
       // nothing to special-case.
+      //
+      // `surfaceFailedCommit` hangs off the container's *return value* for the
+      // reason spelled out on the helper: only a non-thenable return marks the
+      // transactor form, the one shape where knex loses a failed COMMIT. That
+      // return value is available here and nowhere else.
       const wrapped =
         typeof container === 'function'
           ? (transactor: object) => {
               defineAsyncDispose(transactor, () => disposeTransactor(transactor))
-              return (container as (t: object) => unknown)(transactor)
+              const result = (container as (t: object) => unknown)(transactor)
+              if (!isThenable(result)) surfaceFailedCommit(transactor)
+              return result
             }
           : container
       return super.transaction(wrapped, config, outerTx)

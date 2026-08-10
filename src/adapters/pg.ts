@@ -270,13 +270,21 @@ export function createPgAdapter(opts: PgAdapterOptions): DriverAdapter {
     // best-effort `COMMIT` does not, so this check has nothing to do
     // there); turns the silent loss into a typed error, without recovering
     // the work.
+    //
+    // Raising it here is necessary but was not sufficient: knex used to swallow
+    // this error on its way back out whenever the caller committed the
+    // transaction itself (`const trx = await db.transaction()` … `await
+    // trx.commit()`), which resolved as though the write had landed. Getting
+    // that far is `surfaceFailedCommit` in src/core/client.ts — see its comment.
+    // Nothing to change on this side; the note is here because this is where
+    // anyone auditing the guarantee looks first.
     async execute(handle, sql, bindings): Promise<RawResult> {
       const client = handle as PgClientShim
       const res = await client.query(sql, bindings)
       const result = toRawResult(res)
       if (isCommitStatement(sql) && result.command === 'ROLLBACK') {
         throw CfKnexError.commitSilentlyRolledBack(
-          "the transaction's own work may be partially or entirely lost — an earlier statement on this connection failed and its error was caught instead of propagating, leaving the transaction aborted; find and fix that statement.",
+          "the transaction's own work may be partially or entirely lost — an earlier statement on this connection failed and its error was caught instead of propagating, leaving the transaction aborted; find and fix that statement. Nothing can recover the work at this point: postgres rejects every statement on an aborted transaction with 25P02, including a retry. To let a statement fail without destroying the transaction, run it inside a nested transaction (`await trx.transaction(async sp => …)`), which postgres can roll back to.",
         )
       }
       return result
