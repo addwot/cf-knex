@@ -5,6 +5,7 @@ import { createPgAdapter } from '../../src/adapters/pg'
 import { createTidbHttpAdapter } from '../../src/adapters/tidb-http'
 import { createKnexClient } from '../../src/core/client'
 import type { DriverAdapter } from '../../src/core/types'
+import { STALL_BUDGET_MS } from '../support/stall'
 
 // `destroy()` used to wait on tarn's pool drain with no bound, so a single
 // connection the pool could not reclaim hung it forever. test/unit/destroy.test.ts
@@ -70,7 +71,14 @@ function runBoundedDestroySuite(name: string, makeAdapter: () => DriverAdapter) 
 
 if (process.env.TIDB_URL) {
   const url = process.env.TIDB_URL
-  runBoundedDestroySuite('tidb-http (TiDB Cloud Serverless)', () => createTidbHttpAdapter({ url }))
+  // Bounded like every other live TiDB client in this suite — see
+  // ../support/stall.ts. The `BEGIN` below is a real HTTP request and can
+  // stall, and an unbounded stall here reads as `Test timed out in 30000ms`,
+  // which is precisely the "destroy() hung" symptom this file exists to
+  // detect. `timeoutMs` bounds the statement, never `destroy()`, so the
+  // assertion above it is untouched.
+  runBoundedDestroySuite('tidb-http (TiDB Cloud Serverless)', () =>
+    createTidbHttpAdapter({ url, timeoutMs: STALL_BUDGET_MS }))
 } else {
   skip('tidb-http (TiDB Cloud Serverless)', 'TIDB_URL')
 }
