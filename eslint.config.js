@@ -10,6 +10,7 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'off',       // Knex generics require `any` defaults
       '@typescript-eslint/no-unsafe-function-type': 'off', // driver shapes are structurally typed
       '@typescript-eslint/consistent-type-definitions': ['error', 'type'], // house style: type over interface
+      curly: ['error', 'multi-line'], // a brace-less body may not span lines
     },
   },
   {

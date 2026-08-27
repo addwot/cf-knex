@@ -14,21 +14,6 @@ export type { CfKnexErrorCode } from './core/errors'
 export type { DisposableKnex, DisposableTransaction } from './core/disposable'
 export type { ClientConfig, Credentials, DriverAdapter, DriverName, Engine, RawResult } from './core/types'
 
-// `inferDriver` only confirms that `config` names exactly one connection
-// shape and that the resulting driver belongs to `config.engine` — it does
-// NOT confirm that shape is the one the chosen driver actually needs. An
-// explicit `config.driver` skips shape-based inference entirely (see
-// `infer()` in ./core/infer.ts), so e.g. `{ engine: 'sqlite', driver:
-// 'libsql', binding }` passes `inferDriver` — 'binding' is a valid shape,
-// 'libsql' is valid for 'sqlite' — yet supplies libsql with no `url` at all.
-// Reproduced concretely: that exact config previously reached
-// `createLibsqlAdapter({ url: undefined })` and only failed later, on the
-// first query, with `LibsqlError URL_INVALID: The URL 'undefined' is not in
-// a valid format` — a driver-internal error about the string "undefined",
-// not something naming the actual problem. `pg`/`mysql2`'s own factories
-// already guard this themselves (`resolveConfig`/its mysql2 equivalent both
-// throw `NO_CONNECTION` when none of `url`/`connection`/`hyperdrive` is
-// set), so only the three drivers without that self-check need a guard here.
 function buildAdapter(config: ClientConfig, driver: DriverName): DriverAdapter {
   switch (driver) {
     case 'd1':
@@ -65,15 +50,6 @@ export function createClient<TRecord extends {} = any, TResult = unknown[]>(
   return createKnexClient<TRecord, TResult>(buildAdapter(config, driver), config.knex)
 }
 
-// `connectionString` must actually be a string, not merely present: an env
-// value shaped like `{ connectionString: 123 }` (or `{ connectionString:
-// undefined }`, which still satisfies `'connectionString' in value`) used to
-// reach a bare `.startsWith()` call below and throw a raw `TypeError`
-// instead of either matching or cleanly not matching. Malformed-but-present
-// now simply does not match, the same as any other unrelated env value —
-// consistent with `isD1Binding` (imported from ./core/infer, not
-// reimplemented here) checking that `prepare` is actually a function, not
-// just that the key exists.
 function isHyperdriveBinding(value: unknown): value is { connectionString: string } {
   return typeof value === 'object' && value !== null && typeof (value as { connectionString?: unknown }).connectionString === 'string'
 }
