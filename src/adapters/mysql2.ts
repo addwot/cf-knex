@@ -90,6 +90,32 @@ function resolveConnectionOptions(opts: Mysql2AdapterOptions): ConnectionOptions
   throw new CfKnexError('NO_CONNECTION', "mysql2 adapter needs one of 'url', 'connection' or 'hyperdrive'")
 }
 
+// A mysql2 rejection can carry an empty `message`: the promise wrapper's
+// pre-captured `localErr` receives whatever text the failure had, and a
+// server/proxy error packet is allowed to have none (observed from Hyperdrive
+// in production — nine cron failures whose only log line was a headerless
+// "Error\n    at …" stack, with the identifying `code`/`errno`/`sqlState`
+// attached but invisible to anything that serializes an Error as its stack).
+// When that happens, name the failure from the driver fields on the SAME
+// object — identity and every field stay untouched, and because V8 formats
+// `.stack` on first access, the synthesized message reaches the stack header
+// too. An empty-message error with no fields is left alone: there is nothing
+// truthful to say.
+function ensureMessage(err: unknown): unknown {
+  if (!(err instanceof Error) || err.message !== '') return err
+  const { code, errno, sqlState, sqlMessage } = err as Error & {
+    code?: unknown
+    errno?: unknown
+    sqlState?: unknown
+    sqlMessage?: unknown
+  }
+  const fields = Object.entries({ code, errno, sqlState, sqlMessage })
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${String(v)}`)
+  if (fields.length > 0) err.message = `mysql2 error with empty message (${fields.join(', ')})`
+  return err
+}
+
 export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
   // Workers isolates forbid code generation from strings ("Code generation
   // from strings disallowed for this context"). mysql2 compiles its row
@@ -126,7 +152,12 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
       // holds whichever connection it receives for its entire lifetime, so
       // handing the same one to two callers would let an unrelated query
       // land inside an open transaction instead of separately-visible state.
-      const conn = await mysql.createConnection(config)
+      const conn = await mysql.createConnection(config).catch((err: unknown) => {
+        // Same empty-message potential as `execute()`: `createConnection`'s
+        // pre-captured `createConnectionErr` copies the handshake failure's
+        // text, which a proxy may not provide.
+        throw ensureMessage(err)
+      })
       open.add(conn)
       // mysql2/promise's own `createConnectionPromise` already leaves a
       // `once('error', reject)` listener on the raw connection after
@@ -170,7 +201,9 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
 
     async execute(handle, sql, bindings): Promise<RawResult> {
       const conn = handle as unknown as Mysql2ConnectionShim
-      const [rows, fields] = await conn.query(sql, bindings as unknown as QueryValues)
+      const [rows, fields] = await conn.query(sql, bindings as unknown as QueryValues).catch((err: unknown) => {
+        throw ensureMessage(err)
+      })
       return toRawResult(rows, fields)
     },
 

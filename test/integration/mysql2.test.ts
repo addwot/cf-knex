@@ -122,3 +122,110 @@ if (process.env.MYSQL_URL) {
 } else {
   skip('mysql2 forces disableEval on every connection', 'MYSQL_URL')
 }
+
+// mysql2/promise pre-captures each rejection Error before the operation runs
+// (`localErr` in promise.js, `createConnectionErr` in `createConnection`) and
+// copies `message`/`code`/… onto it only after the failure. V8 formats
+// `.stack` lazily on first access, so a message that exists by then does make
+// it into the header — but a *server* error whose packet text is empty leaves
+// `message` as '', and everything that serializes the error as its stack
+// (workerd's console, Workers Logs) then records a bare "Error\n    at …"
+// with `code`/`errno`/`sqlState` silently attached and invisible. Observed in
+// production behind Hyperdrive (poixio, 2026-08-26): nine cron failures whose
+// only log line was a headerless stack. The adapter therefore synthesizes a
+// message from the driver fields when the message is empty (pinned further
+// below); these two pin the ordinary path — a real server message and the
+// driver's own fields survive pass-through on the same object, message in the
+// stack header included.
+if (process.env.MYSQL_URL) {
+  const url = process.env.MYSQL_URL
+
+  test('mysql2 query errors carry their message in the stack header', async () => {
+    const adapter = createMysql2Adapter({ url })
+    const handle = await adapter.acquire()
+    try {
+      const err = await adapter.execute(handle, 'select * from cf_knex_no_such_table_e4d1', []).then(
+        () => null,
+        (e: unknown) => e,
+      )
+      expect(err).toBeInstanceOf(Error)
+      const e = err as Error & { code?: string; errno?: number; sqlState?: string }
+      expect(e.message).toContain('cf_knex_no_such_table_e4d1')
+      expect(e.code).toBe('ER_NO_SUCH_TABLE')
+      expect(e.errno).toBe(1146)
+      expect(e.stack ?? '').toMatch(/^Error: [^\n]*cf_knex_no_such_table_e4d1/)
+    } finally {
+      await adapter.release(handle)
+      await adapter.destroy()
+    }
+  })
+
+  test('mysql2 connect errors carry their message in the stack header', async () => {
+    const bad = new URL(url)
+    bad.password = 'cf-knex-definitely-wrong-password'
+    const adapter = createMysql2Adapter({ url: bad.href })
+    const err = await adapter.acquire().then(
+      () => null,
+      (e: unknown) => e,
+    )
+    try {
+      expect(err).toBeInstanceOf(Error)
+      const e = err as Error
+      expect(e.message).not.toBe('')
+      expect(e.stack ?? '').toContain(`${e.name}: ${e.message.split('\n')[0]}`)
+    } finally {
+      await adapter.destroy()
+    }
+  })
+} else {
+  skip('mysql2 errors carry their message in the stack header', 'MYSQL_URL')
+}
+
+// The empty-message case itself, driven through a fake handle because a real
+// server cannot be made to send empty error text on demand. `execute()` must
+// never surface an Error whose message is '' while the driver fields can name
+// the failure: the same object is rethrown — identity and `code`/`errno`/
+// `sqlState` untouched — with the synthesized message present, and (because
+// V8 formats `.stack` on first access) in the stack header too.
+test('mysql2 empty-message driver errors get a message built from their fields', async () => {
+  const adapter = createMysql2Adapter({ url: 'mysql://user:pw@localhost:3306/db' })
+  const original = Object.assign(new Error(), { code: 'ER_UNKNOWN', errno: 1105, sqlState: 'HY000' })
+  const handle = { query: () => Promise.reject(original) }
+  const err = await adapter.execute(handle, 'select 1', []).then(
+    () => null,
+    (e: unknown) => e,
+  )
+  expect(err).toBe(original)
+  const e = err as Error & { code?: string; errno?: number; sqlState?: string }
+  expect(e.message).toContain('ER_UNKNOWN')
+  expect(e.message).toContain('1105')
+  expect(e.message).toContain('HY000')
+  expect(e.code).toBe('ER_UNKNOWN')
+  expect(e.errno).toBe(1105)
+  expect(e.sqlState).toBe('HY000')
+  expect((e.stack ?? '').split('\n')[0]).toContain('ER_UNKNOWN')
+})
+
+test('mysql2 errors that already have a message pass through untouched', async () => {
+  const adapter = createMysql2Adapter({ url: 'mysql://user:pw@localhost:3306/db' })
+  const original = Object.assign(new Error('already told'), { code: 'ER_X' })
+  const handle = { query: () => Promise.reject(original) }
+  const err = await adapter.execute(handle, 'select 1', []).then(
+    () => null,
+    (e: unknown) => e,
+  )
+  expect(err).toBe(original)
+  expect((err as Error).message).toBe('already told')
+})
+
+test('mysql2 empty-message errors with no driver fields are left alone', async () => {
+  const adapter = createMysql2Adapter({ url: 'mysql://user:pw@localhost:3306/db' })
+  const original = new Error()
+  const handle = { query: () => Promise.reject(original) }
+  const err = await adapter.execute(handle, 'select 1', []).then(
+    () => null,
+    (e: unknown) => e,
+  )
+  expect(err).toBe(original)
+  expect((err as Error).message).toBe('')
+})
