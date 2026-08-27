@@ -47,6 +47,23 @@ function resolveConnectionOptions(opts: Mysql2AdapterOptions): ConnectionOptions
   throw new CfKnexError('NO_CONNECTION', "mysql2 adapter needs one of 'url', 'connection' or 'hyperdrive'")
 }
 
+function ensureMessage(err: unknown): unknown {
+  if (!(err instanceof Error) || err.message !== '') return err
+  const { code, errno, sqlState, sqlMessage } = err as Error & {
+    code?: unknown
+    errno?: unknown
+    sqlState?: unknown
+    sqlMessage?: unknown
+  }
+  const fields = Object.entries({ code, errno, sqlState, sqlMessage })
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${String(v)}`)
+  // Mutated in place rather than replaced with a new Error, which would drop the driver's own
+  // `code`/`errno`/`sqlState` and change identity for anything already holding the original.
+  if (fields.length > 0) err.message = `mysql2 error with empty message (${fields.join(', ')})`
+  return err
+}
+
 export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
   const config: ConnectionOptions = { ...resolveConnectionOptions(opts), disableEval: true }
 
@@ -66,7 +83,9 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
       } catch {
         throw CfKnexError.missingDriver('mysql2')
       }
-      const conn = await mysql.createConnection(config)
+      const conn = await mysql.createConnection(config).catch((err: unknown) => {
+        throw ensureMessage(err)
+      })
       open.add(conn)
       ;(conn as unknown as Mysql2ConnectionShim).on('error', () => dead.add(conn))
       return conn
@@ -89,7 +108,9 @@ export function createMysql2Adapter(opts: Mysql2AdapterOptions): DriverAdapter {
     async execute(handle, sql, bindings): Promise<RawResult> {
       const conn = handle as unknown as Mysql2ConnectionShim
       // `query()`, never `execute()`: Hyperdrive does not support MySQL COM_STMT_PREPARE.
-      const [rows, fields] = await conn.query(sql, bindings as unknown as QueryValues)
+      const [rows, fields] = await conn.query(sql, bindings as unknown as QueryValues).catch((err: unknown) => {
+        throw ensureMessage(err)
+      })
       return toRawResult(rows, fields)
     },
 
