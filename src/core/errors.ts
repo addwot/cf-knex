@@ -40,12 +40,6 @@ export class CfKnexError extends Error {
     )
   }
 
-  // A statement that was meant to run inside an open transaction was executed
-  // by the server outside it, where COMMIT/ROLLBACK can no longer govern it.
-  // The failure this exists for is silent: the write succeeds, the caller's
-  // rollback reports success, and the row is still there afterwards. Raised
-  // rather than tolerated because there is no safe way to continue — the
-  // transaction's atomicity is already gone by the time it is detectable.
   static transactionEscaped(detail: string): CfKnexError {
     return new CfKnexError(
       'TRANSACTION_ESCAPED',
@@ -53,12 +47,6 @@ export class CfKnexError extends Error {
     )
   }
 
-  // Raised only when the caller asked for a bound and it expired — never for
-  // a request that failed on its own. The statement's fate is genuinely
-  // unknown at this point: the abort stops this client waiting, it does not
-  // reach the server, so a write may still be applied after this throws.
-  // Neither the URL nor the SQL reaches the message; the budget is the one
-  // thing here that is the caller's own value.
   static requestTimedOut(driver: string, ms: number): CfKnexError {
     return new CfKnexError(
       'REQUEST_TIMEOUT',
@@ -66,9 +54,6 @@ export class CfKnexError extends Error {
     )
   }
 
-  // Covers both halves of what knex can ask for and a driver may not honor:
-  // an isolation level, and `SET TRANSACTION READ ONLY`. One code rather than
-  // one per case, so a caller can branch on `err.code` once.
   static unsupportedTransactionMode(detail: string): CfKnexError {
     return new CfKnexError('UNSUPPORTED_TRANSACTION_MODE', `unsupported transaction mode: ${detail}`)
   }
